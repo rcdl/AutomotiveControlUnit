@@ -40,6 +40,12 @@ FLAGS_VALUE resync = DISABLED;
 // Errors
 // TODO
 
+// Prototipo
+void edge_detection();
+void bit_timing();
+void sample();
+void write();
+
 void setup() {
   // put your setup code here, to run once:
   pinMode(RX_PIN, INPUT);
