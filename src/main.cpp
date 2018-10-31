@@ -86,7 +86,7 @@ void bit_timing() {
           sample_point = ENABLED;
           // write_point = DISABLED;
           state = BTL_SEG2;
-        }*
+        }
       }
       break;
 
