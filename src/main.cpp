@@ -12,9 +12,11 @@
 #define TIMEQUANTAPULSES (Fosc / ( BITRATE * BIT_TQ)) 
 #define TIMERBASE (65536 - TIMEQUANTAPULSES)
 
-#define RX_PIN 2
-#define TX_PIN 3
+// Constants
+const int RX_PIN = 2;
+const int TX_PIN = 3;
 
+// Enum
 enum FLAGS_VALUE {
   DISABLED = 0,
   ENABLED
@@ -29,6 +31,8 @@ enum BIT_TIMING_STATES{
 // Writing and sampling
 FLAGS_VALUE sample_point = DISABLED;
 FLAGS_VALUE write_point = DISABLED;
+int sample_bit = HIGH;
+int write_bit = HIGH;
 // Flags
 FLAGS_VALUE idle = ENABLED;
 FLAGS_VALUE hard_sync = DISABLED;
@@ -38,6 +42,8 @@ FLAGS_VALUE resync = DISABLED;
 
 void setup() {
   // put your setup code here, to run once:
+  pinMode(RX_PIN, INPUT);
+  pinMode(TX_PIN, OUTPUT);
   attachInterrupt(digitalPinToInterrupt(RX_PIN), edge_detection, FALLING);
 }
 
@@ -59,7 +65,7 @@ void bit_timing() {
 
   switch (state){
     case BTL_SYNC:
-      sample_point = DISABLED;
+      // sample_point = DISABLED;
       hard_sync = DISABLED;
       resync = DISABLED;
       state = BTL_SEG1;
@@ -78,9 +84,9 @@ void bit_timing() {
         if (tq_count >= PHASE_SEG_1) {
           tq_count = 0;
           sample_point = ENABLED;
-          write_point = DISABLED;
+          // write_point = DISABLED;
           state = BTL_SEG2;
-        }
+        }*
       }
       break;
 
@@ -106,5 +112,19 @@ void bit_timing() {
         }
       }
       break;
+  }
+}
+
+void sample() {
+  if (sample_point == ENABLED) {
+    sample_bit = digitalRead(RX_PIN);
+    sample_point = DISABLED;
+  }
+}
+
+void write() {
+  if (write_point == ENABLED) {
+    digitalWrite(TX_PIN, write_bit);
+    write_point = DISABLED;
   }
 }
