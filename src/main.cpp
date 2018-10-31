@@ -9,7 +9,7 @@
 
 #define Fosc 16000000  // 16MHz
 #define BITRATE 10000  // 500kbps
-#define TIMEQUANTAPULSES (Fosc / ( BITRATE * BIT_TQ)) 
+#define TIMEQUANTAPULSES (Fosc / ( BITRATE * BIT_TQ))
 #define TIMERBASE (65536 - TIMEQUANTAPULSES)
 
 // Constants
@@ -45,6 +45,21 @@ void edge_detection();
 void bit_timing();
 void sample();
 void write();
+
+void init_timer(){
+  TCCR1A = 0;                        //confira timer para operação normal pinos OC1A e OC1B desconectados
+  TCCR1B = 0;                        //limpa registrador
+  TCCR1B |= (1<<CS10);               // configura prescaler para 1: CS12 = 0, CS11 = 0 e CS10 = 1
+
+  TCNT1 = 0xFFFE;                    // 0xFFFE = 65534, offset para contar apenas 2 pulsos
+  TIMSK1 |= (1 << TOIE1);            // habilita interrupcao do timer
+}
+
+ISR(TIMER1_OVF_vect)                              //interrupção do TIMER1
+{
+  TCNT1 = 0xFFFE;                                 // Renicia TIMER
+  bit_timing();
+}
 
 void setup() {
   // put your setup code here, to run once:
