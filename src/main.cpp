@@ -7,12 +7,17 @@
 #define BIT_TQ (1 + PHASE_SEG_1 + PHASE_SEG_2)
 #define SJW 1
 
+#define Fosc 16000000  // 16MHz
+#define BITRATE 10000  // 500kbps
+#define TIMEQUANTAPULSES (Fosc / ( BITRATE * BIT_TQ)) 
+#define TIMERBASE (65536 - TIMEQUANTAPULSES)
+
 #define RX_PIN 2
 #define TX_PIN 3
 
-enum BIT_VALUE {
-  DOMINANT = 0,
-  RECESSIVE
+enum FLAGS_VALUE {
+  DISABLED = 0,
+  ENABLED
 };
 
 enum BIT_TIMING_STATES{
@@ -22,9 +27,12 @@ enum BIT_TIMING_STATES{
 };
 
 // Writing and sampling
-BIT_VALUE sample_point, writing_point;
+FLAGS_VALUE sample_point = DISABLED;
+FLAGS_VALUE write_point = DISABLED;
 // Flags
-BIT_VALUE idle=RECESSIVE, hard_sync, resync;
+FLAGS_VALUE idle = ENABLED;
+FLAGS_VALUE hard_sync = DISABLED;
+FLAGS_VALUE resync = DISABLED;
 // Errors
 // TODO
 
@@ -38,10 +46,10 @@ void loop() {
 }
 
 void edge_detection() {
-  if (idle == RECESSIVE) {
-    hard_sync = RECESSIVE;
+  if (idle == ENABLED) {
+    hard_sync = ENABLED;
   } else {
-    resync = RECESSIVE;
+    resync = ENABLED;
   }
 }
 
@@ -51,42 +59,45 @@ void bit_timing() {
 
   switch (state){
     case BTL_SYNC:
-      sample_point = RECESSIVE;
-      hard_sync = DOMINANT;
-      resync = DOMINANT;
+      sample_point = DISABLED;
+      hard_sync = DISABLED;
+      resync = DISABLED;
       state = BTL_SEG1;
       break;
+
     case BTL_SEG1:
       tq_count++;
-      if (hard_sync == RECESSIVE) {
+      if (hard_sync == ENABLED) {
         tq_count = 0;
-        hard_sync = DOMINANT;
-      }
-      if (resync == RECESSIVE) {
-        tq_count = max(0, tq_count - SJW);
-        resync = DOMINANT;
-      }
-      if (tq_count >= PHASE_SEG_1) {
-        tq_count = 0;
-        sample_point = DOMINANT;
-        writing_point = RECESSIVE;
-        state = BTL_SEG2;
+        hard_sync = DISABLED;
+      } else {
+        if (resync == ENABLED) {
+          tq_count = max(0, tq_count - SJW);
+          resync = DISABLED;
+        }
+        if (tq_count >= PHASE_SEG_1) {
+          tq_count = 0;
+          sample_point = ENABLED;
+          write_point = DISABLED;
+          state = BTL_SEG2;
+        }
       }
       break;
+
     case BTL_SEG2:
       tq_count++;
-      if (hard_sync == RECESSIVE) {
+      if (hard_sync == ENABLED) {
         tq_count = 0;
-        hard_sync = DOMINANT;
+        hard_sync = DISABLED;
         state = BTL_SEG1;
       } else {
-        if (resync == RECESSIVE) {
+        if (resync == ENABLED) {
           tq_count = min(PHASE_SEG_2 + 1, tq_count + SJW);
-          resync = DOMINANT;
+          resync = DISABLED;
         }
         if (tq_count == PHASE_SEG_2) {
           tq_count = 0;
-          writing_point = DOMINANT;
+          write_point = ENABLED;
           state = BTL_SYNC;
         }
         if (tq_count > PHASE_SEG_2) {
