@@ -14,8 +14,8 @@
 #define TIMERBASE (65536 - TIMEQUANTAPULSES)
 
 // Constants
-const int RX_PIN = 2;
-const int TX_PIN = 3;
+const int RX_PIN = 3;
+const int TX_PIN = 2;
 
 // Enum
 enum FLAGS_VALUE {
@@ -34,10 +34,12 @@ FLAGS_VALUE sample_point = DISABLED;
 FLAGS_VALUE write_point = DISABLED;
 int sample_bit = HIGH;
 int write_bit = HIGH;
+
 // Flags
 FLAGS_VALUE idle = ENABLED;
 FLAGS_VALUE hard_sync = DISABLED;
 FLAGS_VALUE resync = DISABLED;
+
 // Errors
 
 
@@ -47,36 +49,42 @@ const int HARDSYNC_PIN = 5;
 const int SOFTSYNC_PIN = 6;
 const int STATE_HIGH_PIN = 7;
 const int STATE_LOW_PIN = 8;
+const int IDLE_TEST_PIN = 11;
 int tq_indicator = 0;
 int hs_indicator = 0;
 int ss_indicator = 0;
 
-// Prototipo
+// Protótipo
 void edge_detection();
 void bit_timing();
 void sample();
 void write();
 void testWriteState(BIT_TIMING_STATES target);
 
-void init_timer(){
+void init_timer() {
   TCCR1A = 0;                        //confira timer para operação normal pinos OC1A e OC1B desconectados
-  TCCR1B = 0;                        //limpa registrador
-  TCCR1B |= (1<<CS10);               // configura prescaler para 1: CS12 = 0, CS11 = 0 e CS10 = 1
+  TCCR1B = 0;                         //limpa registrador
+  // TCCR1B |= (1<<CS10);                // configura prescaler para 1: CS12 = 0, CS11 = 0 e CS10 = 1
+  TCCR1B |= (1<<CS10) | (1<<CS12);
 
-  TCNT1 = 0xFFFE;                    // 0xFFFE = 65534, offset para contar apenas 2 pulsos
-  TIMSK1 |= (1 << TOIE1);            // habilita interrupcao do timer
+  // TCNT1 = TIMERBASE;               // 0xFFFE = 65534, offset para contar apenas 2 pulsos
+  TCNT1 = 0xC2F7;
+  TIMSK1 |= (1 << TOIE1);             // habilita interrupcao do timer
 }
 
 ISR(TIMER1_OVF_vect)                              //interrupção do TIMER1
 {
-  TCNT1 = 0xFFFE;                                 // Renicia TIMER
+  // TCNT1 = TIMERBASE;                           // Renicia TIMER
+  TCNT1 = 0xC2F7;
   bit_timing();
 }
 
 void setup() {
+  Serial.begin(9600);
   pinMode(RX_PIN, INPUT);
   pinMode(TX_PIN, OUTPUT);
   attachInterrupt(digitalPinToInterrupt(RX_PIN), edge_detection, FALLING);
+  init_timer();
 
   // Tests
   pinMode(TQ_INDICATOR_PIN, OUTPUT);
@@ -84,13 +92,17 @@ void setup() {
   pinMode(SOFTSYNC_PIN, OUTPUT);
   pinMode(STATE_HIGH_PIN, OUTPUT);
   pinMode(STATE_LOW_PIN, OUTPUT);
+  pinMode(IDLE_TEST_PIN, INPUT);
   digitalWrite(TQ_INDICATOR_PIN, (tq_indicator) ? HIGH : LOW);
   digitalWrite(HARDSYNC_PIN, (hs_indicator) ? HIGH : LOW);
   digitalWrite(SOFTSYNC_PIN, (ss_indicator) ? HIGH : LOW);
   testWriteState(DEFAULT_BTL_STATE);
+
+  // timer1.start();
 }
 
 void loop() {
+  // timer1.update();
   // put your main code here, to run repeatedly:
   // if (write_point) {
   // encode();
@@ -103,6 +115,7 @@ void loop() {
 }
 
 void edge_detection() {
+  idle = digitalRead(IDLE_TEST_PIN) ? ENABLED : DISABLED;
   if (idle == ENABLED) {
     hard_sync = ENABLED;
     hs_indicator = !hs_indicator;
@@ -118,12 +131,12 @@ void bit_timing() {
   static BIT_TIMING_STATES state = DEFAULT_BTL_STATE;  
   static int tq_count = 0;
 
+
   tq_indicator = !tq_indicator;
   digitalWrite(TQ_INDICATOR_PIN, (tq_indicator) ? HIGH : LOW);
 
   switch (state){
     case BTL_SYNC:
-      // sample_point = DISABLED;
       hard_sync = DISABLED;
       resync = DISABLED;
       state = BTL_SEG1;
@@ -175,6 +188,17 @@ void bit_timing() {
       }
       break;
   }
+
+  for(int i=0;i<10;i++){
+    Serial.print(state);
+    Serial.print("\t");
+    Serial.print(tq_indicator + 4);
+    Serial.print("\t");
+    Serial.print(hs_indicator + 7);
+    Serial.print("\t");
+    Serial.println(ss_indicator + 10); 
+  }
+
 }
 
 void sample() {
