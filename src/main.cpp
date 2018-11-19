@@ -8,6 +8,7 @@
 #define BIT_TQ (1 + PHASE_SEG_1 + PHASE_SEG_2)
 #define SJW 1
 #define DEFAULT_BTL_STATE BTL_SEG1
+#define DEFAULT_DECODER_STATE IDLE
 #define Fosc 16000000  // 16MHz
 #define BITRATE 500000  // 500kbps
 #define TIMEQUANTAPULSES (Fosc / ( BITRATE * BIT_TQ))
@@ -29,8 +30,29 @@ enum BIT_TIMING_STATES{
   BTL_SEG2
 };
 
+enum DECODER_STATES{
+  IDLE = 0,
+  ID_STANDARD,
+  ID_EXTENDED,
+  RTR_SRR,
+  RTR,
+  IDE,
+  R0,
+  R1,
+  DLC,
+  DATA,
+  CRC,
+  CRC_DEL,
+  ACK_SLOT,
+  ACK_DEL,
+  _EOF,
+  INTERMISSION,
+  ACTIVE_ERROR,
+  PASSIVE_ERROR
+};
+
 // Writing and sampling
-FLAGS_VALUE sample_point = DISABLED;
+FLAGS_VALUE sample_point = DISABLED; 
 FLAGS_VALUE write_point = DISABLED;
 int sample_bit = HIGH;
 int write_bit = HIGH;
@@ -39,6 +61,8 @@ int write_bit = HIGH;
 FLAGS_VALUE idle = ENABLED;
 FLAGS_VALUE hard_sync = DISABLED;
 FLAGS_VALUE resync = DISABLED;
+FLAGS_VALUE arbitration = DISABLED;
+FLAGS_VALUE stuffing = DISABLED;
 
 // Errors
 // Empty for now
@@ -54,12 +78,35 @@ int tq_indicator = 0;
 int hs_indicator = 0;
 int ss_indicator = 0;
 
+typedef struct Frame_fields {
+  unsigned id_standard  : 11;
+  unsigned id_extended  : 18;
+  unsigned rtr_srr      : 1;
+  unsigned ide          : 1;
+  unsigned r0           : 11;
+  unsigned r1           : 11;
+  unsigned dlc          : 4;
+  unsigned data         : 64;
+  unsigned crc          : 15;
+  unsigned crc_del      : 1;
+  unsigned ack_slot     : 1;
+  unsigned ack_del      : 1;
+  unsigned eof          : 7;
+  unsigned intermission : 3;
+} frame_fields;
+
+union frame_union {
+  char raw[19];
+  frame_fields fields;
+} frame;
+
 // Prototype
 void edge_detection();                          // Callback to RX falling edges
 void bit_timing();                              // Bit timing state machine
 void sample();                                  // Sampling logic
 void write();                                   // Writing logic
 void testWriteState(BIT_TIMING_STATES target);  // Tests - State pins logic
+void decode();                                  // Decoder state machine
 
 // Timer configuration
 void init_timer() {
@@ -215,10 +262,19 @@ void bit_timing() {
 }
 
 void sample() {
+  static int stuffing_count = 0;
+  static int last_read;
   if (sample_point == ENABLED) {
     sample_bit = digitalRead(RX_PIN);
+    if (stuffing == ENABLED) {
+      if (last_read == sample_bit) stuffing_count++;
+      else stuffing_count = 0;
+    }
+    if(stuffing_count == 5) sample_bit = !sample_bit;
+    last_read = sample_bit;
     sample_point = DISABLED;
   }
+
 }
 
 void write() {
@@ -241,4 +297,133 @@ void testWriteState(BIT_TIMING_STATES target) {
     digitalWrite(STATE_HIGH_PIN, HIGH);
     digitalWrite(STATE_LOW_PIN, LOW);
   }
+}
+
+void decode(){
+  static DECODER_STATES state = DEFAULT_DECODER_STATE;
+  static unsigned id_count = 0, dlc_count = 0, data_count = 0, crc_count = 0, eof_count = 0, intermission_count = 0;
+  
+  switch (state) {
+    case IDLE:
+      if (sample_bit == LOW) {
+        //idle = DISABLED; ?
+        state = ID_STANDARD;
+      }
+      break;
+
+    case ID_STANDARD:
+      idle = DISABLED;
+      arbitration = ENABLED;
+      stuffing = ENABLED;
+      frame.fields.id_standard <<= 1;
+      frame.fields.id_standard = (frame.fields.id_standard & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
+      id_count++;
+      if ( id_count == 11) state = RTR_SRR;
+      break;
+
+    case RTR_SRR:
+      frame.fields.rtr_srr = sample_bit;
+      if ( frame.fields.ide == 0) state = IDE;
+      else state = R1;
+      break;
+
+    case IDE:
+      //arbitration = sample_bit?
+      frame.fields.ide = sample_bit;
+      if (frame.fields.ide == 0) state = R0;
+      else state = ID_EXTENDED;
+      break;
+
+    case ID_EXTENDED:
+      frame.fields.id_extended <<= 1;
+      frame.fields.id_extended = (frame.fields.id_extended & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
+      id_count++;
+      if (id_count == 29) state = RTR_SRR;
+      break;
+
+    case R0:
+      frame.fields.r0 = sample_bit;
+      state = DLC;
+      break;
+
+    case R1:
+      frame.fields.r1 = sample_bit;
+      //arbitration = 0;
+      state = R0;
+      break;
+
+    case DLC:
+      frame.fields.dlc <<= 1;
+      frame.fields.dlc = (frame.fields.dlc & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
+      dlc_count++;
+      if( dlc_count == 4 && frame.fields.rtr_srr == 0 && frame.fields.dlc > 0) state = DATA;
+      else state = CRC;
+      break;
+
+    case DATA:
+      frame.fields.data <<= 1;
+      frame.fields.data = (frame.fields.data & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
+      data_count++;
+      if(data_count == frame.fields.dlc*8) state = CRC;
+      break;
+
+    case CRC:
+      frame.fields.crc <<= 1;
+      frame.fields.crc = (frame.fields.crc & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
+      crc_count++;
+      if (crc_count == 15) state = CRC_DEL;
+      break;
+
+    case CRC_DEL:
+      stuffing = DISABLED;
+      //sample_stuff=0; ?
+      frame.fields.crc_del = sample_bit;
+      if (frame.fields.crc_del == 1) state = ACK_SLOT;
+      else state = ACTIVE_ERROR;
+      break;
+
+    case ACK_SLOT:
+      frame.fields.ack_slot = sample_bit;
+      if (frame.fields.ack_slot == 0) state = ACK_DEL;
+      else state = ACTIVE_ERROR;
+      break;
+
+    case ACK_DEL:
+      frame.fields.ack_del = sample_bit;
+      if (frame.fields.ack_del != 1 || check_crc() ) state = ACTIVE_ERROR;
+      else state = _EOF;
+      break;
+
+    case _EOF:
+      frame.fields.eof <<= 1;
+      frame.fields.eof = (frame.fields.eof & 0x1) ? (sample_bit == HIGH ? 0x1 : 0x0);
+      eof_count++;
+      if (eof_count == 7) state = INTERMISSION;
+      break;
+
+    case INTERMISSION:
+      frame.fields.intermission <<= 1;
+      frame.fields.intermission = (frame.fields.intermission & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
+      intermission_count++;
+      if (intermission_count == 3 && sample_bit == 0){
+        state = ID_STANDARD;
+        intermission_count = 0;
+      } else if (intermission_count == 3 && sample_bit == 1) {
+        state = IDLE;
+        intermission_count = 0;
+      }
+      id_count = 0;
+      dlc_count = 0;
+      data_count = 0;
+      crc_count = 0;
+      eof_count = 0;
+      break;
+
+    case ACTIVE_ERROR:
+      //not requested, empty for now
+      break;
+      
+  } // end of switch
+
+
 }
