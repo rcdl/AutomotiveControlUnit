@@ -35,7 +35,6 @@ enum DECODER_STATES{
   ID_STANDARD,
   ID_EXTENDED,
   RTR_SRR,
-  RTR,
   IDE,
   R0,
   R1,
@@ -79,20 +78,21 @@ int hs_indicator = 0;
 int ss_indicator = 0;
 
 typedef struct Frame_fields {
-  unsigned id_standard  : 11;
-  unsigned id_extended  : 18;
-  unsigned rtr_srr      : 1;
-  unsigned ide          : 1;
-  unsigned r0           : 11;
-  unsigned r1           : 11;
-  unsigned dlc          : 4;
-  unsigned data         : 64;
-  unsigned crc          : 15;
-  unsigned crc_del      : 1;
-  unsigned ack_slot     : 1;
-  unsigned ack_del      : 1;
-  unsigned eof          : 7;
-  unsigned intermission : 3;
+  unsigned  id_standard       : 11;
+  unsigned long  id_extended  : 18;
+  unsigned rtr_srr            : 1;
+  unsigned ide                : 1;
+  unsigned r0                 : 11;
+  unsigned r1                 : 11;
+  unsigned dlc                : 4;
+  unsigned long data1         : 32;
+  unsigned long data2         : 32;
+  unsigned crc                : 15;
+  unsigned crc_del            : 1;
+  unsigned ack_slot           : 1;
+  unsigned ack_del            : 1;
+  unsigned eof                : 7;
+  unsigned intermission       : 3;
 } frame_fields;
 
 union frame_union {
@@ -107,6 +107,7 @@ void sample();                                  // Sampling logic
 void write();                                   // Writing logic
 void testWriteState(BIT_TIMING_STATES target);  // Tests - State pins logic
 void decode();                                  // Decoder state machine
+int check_crc();
 
 // Timer configuration
 void init_timer() {
@@ -361,8 +362,13 @@ void decode(){
       break;
 
     case DATA:
-      frame.fields.data <<= 1;
-      frame.fields.data = (frame.fields.data & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
+      if (data_count < 32){
+        frame.fields.data1 <<= 1;
+        frame.fields.data1 = (frame.fields.data1 & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
+      } else {
+        frame.fields.data2 <<= 1;
+        frame.fields.data2 = (frame.fields.data2 & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
+      }
       data_count++;
       if(data_count == frame.fields.dlc*8) state = CRC;
       break;
@@ -396,7 +402,7 @@ void decode(){
 
     case _EOF:
       frame.fields.eof <<= 1;
-      frame.fields.eof = (frame.fields.eof & 0x1) ? (sample_bit == HIGH ? 0x1 : 0x0);
+      frame.fields.eof = (frame.fields.eof & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
       eof_count++;
       if (eof_count == 7) state = INTERMISSION;
       break;
@@ -422,7 +428,7 @@ void decode(){
     case ACTIVE_ERROR:
       //not requested, empty for now
       break;
-      
+
   } // end of switch
 
 
