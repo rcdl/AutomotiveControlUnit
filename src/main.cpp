@@ -14,6 +14,11 @@
 #define TIMEQUANTAPULSES (Fosc / ( BITRATE * BIT_TQ))
 #define TIMERBASE (65536 - TIMEQUANTAPULSES)
 
+// Stuffing settings
+#define NO_STUFFING 0
+#define YES_STUFFING 1
+#define STUFFING_ERROR 2
+
 // Pins
 const int RX_PIN = 3;  // From transceiver
 const int TX_PIN = 2;  // To transceiver
@@ -35,6 +40,7 @@ enum DECODER_STATES{
   ID_STANDARD,
   ID_EXTENDED,
   RTR_SRR,
+  RTR,
   IDE,
   R0,
   R1,
@@ -55,7 +61,6 @@ FLAGS_VALUE sample_point = DISABLED;
 FLAGS_VALUE write_point = DISABLED;
 int sample_bit = HIGH;
 int write_bit = HIGH;
-int last_bit = HIGH;
 
 // Flags
 FLAGS_VALUE idle = ENABLED;
@@ -63,12 +68,7 @@ FLAGS_VALUE hard_sync = DISABLED;
 FLAGS_VALUE resync = DISABLED;
 FLAGS_VALUE arbitration = DISABLED;
 FLAGS_VALUE stuffing = DISABLED;
-
-FLAGS_VALUE idle_ss = ENABLED;
-FLAGS_VALUE hard_sync_ss = DISABLED;
-FLAGS_VALUE resync_ss = DISABLED;
-FLAGS_VALUE arbitration_ss = DISABLED;
-FLAGS_VALUE stuffing_ss = DISABLED;
+FLAGS_VALUE jackson_enable = DISABLED;
 
 
 // Errors
@@ -89,7 +89,8 @@ typedef struct Frame_fields {
   unsigned start_of_frame     : 1;
   unsigned  id_standard       : 11;
   unsigned long  id_extended  : 18;
-  unsigned rtr_srr            : 1;
+  unsigned rtr                : 1;
+  unsigned srr                : 1;
   unsigned ide                : 1;
   unsigned r0                 : 11;
   unsigned r1                 : 11;
@@ -115,10 +116,9 @@ void bit_timing();                              // Bit timing state machine
 void sample();                                  // Sampling logic
 void write();                                   // Writing logic
 void testWriteState(BIT_TIMING_STATES target);  // Tests - State pins logic
-void decoder_fsm();                                  // Decoder state machine
 int check_crc();
-void encode_decode();
-bool get_stuffing();
+void jackson();
+void zerar_frame();
 
 // Timer configuration
 void init_timer() {
@@ -161,7 +161,10 @@ void setup() {
 
 void loop() {
   // Where decoding/encoding will be handled. Next task assignment
-  encode_decode();
+  if (jackson_enable == ENABLED) {
+    jackson_enable = DISABLED;
+    jackson(sample_bit);
+  }
 }
 
 void edge_detection() {
@@ -185,10 +188,6 @@ void bit_timing() {
   static BIT_TIMING_STATES state = DEFAULT_BTL_STATE;
   static int tq_count = 0;  // Counts from 0 to segment size
 
-  //first check write
-  write();
-
-  //second BTL
   switch (state){
     case BTL_SYNC:
       // Sync segment - always 1 tq long
@@ -215,7 +214,7 @@ void bit_timing() {
         if (tq_count >= PHASE_SEG_1) {
           // End of segment handling
           tq_count = 0;
-          sample_point = ENABLED;
+          sample();
           state = BTL_SEG2;
         }
       }
@@ -238,7 +237,7 @@ void bit_timing() {
         if (tq_count == PHASE_SEG_2) {
           // Default end of segment handling
           tq_count = 0;
-          write_point = ENABLED;
+          write();
           state = BTL_SYNC;
         }
         if (tq_count > PHASE_SEG_2) {
@@ -250,8 +249,6 @@ void bit_timing() {
       break;
   }
 
-  // finally check sample
-  sample();
 
   tq_indicator = !tq_indicator;                                 // Tests - Toggle pin state
   digitalWrite(TQ_INDICATOR_PIN, (tq_indicator) ? HIGH : LOW);  // Tests - Write indicator to pin
@@ -274,22 +271,12 @@ void bit_timing() {
 }
 
 void sample() {
-  if (sample_point == ENABLED) {
-    //saving a screenshot of the flags
-    hard_sync_ss = hard_sync;
-    resync_ss = resync;
-    arbitration_ss = arbitration;
-    stuffing_ss = stuffing;
-    idle_ss = idle;
-
-    sample_bit = digitalRead(RX_PIN);
+  sample_bit = digitalRead(RX_PIN);
+  jackson_enable = ENABLED;
 }
 
 void write() {
-  if (write_point == ENABLED) {
-    digitalWrite(TX_PIN, write_bit);
-    write_point = DISABLED;
-  }
+  digitalWrite(TX_PIN, write_bit);
 }
 
 void testWriteState(BIT_TIMING_STATES target) {
@@ -307,85 +294,159 @@ void testWriteState(BIT_TIMING_STATES target) {
   }
 }
 
-void decoder_fsm() {
+void jackson(int ctx_bit) {
   static DECODER_STATES state = DEFAULT_DECODER_STATE;
   static unsigned count = 0;
+  static int rtr_srr;
+  int stuffing_state;
   
-
   switch (state) {
     case IDLE:
-      if (sample_bit == LOW) {
-        frame.fields.start_of_frame = sample_bit;
+      idle = ENABLED;
+      if (ctx_bit == LOW) {
+        zerar_frame();
+        frame.fields.start_of_frame = ctx_bit;
+        idle = DISABLED;
+        arbitration = ENABLED;
+        stuffing = ENABLED;
         state = ID_STANDARD;
       }
       break;
 
     case ID_STANDARD:
-      idle = DISABLED;
-      arbitration = ENABLED;
-      stuffing = ENABLED;
-      frame.fields.id_standard <<= 1;
-      frame.fields.id_standard = (frame.fields.id_standard & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
-      count++;
-      if (count == 11) state = RTR_SRR;
+      stuffing_state = check_stuffing(ctx_bit);
+      if(stuffing_state == NO_STUFFING){
+        frame.fields.id_standard <<= 1;
+        frame.fields.id_standard |= (ctx_bit == HIGH ? 0x1 : 0x0);
+        count++;
+        if (count >= 11) {
+          count = 0;
+          state = RTR_SRR;
+        }
+      } else if (stuffing_state == STUFFING_ERROR) {
+        count = 0;
+        state = ACTIVE_ERROR;
+        //ToDo
+      }
       break;
 
     case RTR_SRR:
-      frame.fields.rtr_srr = sample_bit;
-      if (frame.fields.ide == 0) state = IDE;
-      else state = R1;
+      stuffing_state = check_stuffing(ctx_bit);
+      if(stuffing_state == NO_STUFFING){
+        rtr_srr = ctx_bit;
+        state = IDE;
+      } else if (stuffing_state == STUFFING_ERROR) {
+        state = ACTIVE_ERROR;
+        //ToDo
+      }
       break;
 
     case IDE:
-      //arbitration = sample_bit?
-      frame.fields.ide = sample_bit;
-      if (frame.fields.ide == 0) state = R0;
-      else state = ID_EXTENDED;
+      stuffing_state = check_stuffing(ctx_bit);
+      if (stuffing_state == NO_STUFFING) {
+        frame.fields.ide = ctx_bit;
+        if (ctx_bit == HIGH) { // extended frame
+          frame.fields.srr = rtr_srr;
+          state = ID_EXTENDED;
+        } else {  // standard
+          arbitration = DISABLED;
+          frame.fields.rtr = rtr_srr;
+          state = R0;
+        }
+      } else if (stuffing_state == STUFFING_ERROR) {
+        state = ACTIVE_ERROR;
+        //ToDo
+      }
       break;
 
     case ID_EXTENDED:
-      frame.fields.id_extended <<= 1;
-      frame.fields.id_extended = (frame.fields.id_extended & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
-      count++;
-      if (count == 29) {
-        state = RTR_SRR;
+      stuffing_state = check_stuffing(ctx_bit);
+      if (stuffing_state == NO_STUFFING) {
+        frame.fields.id_extended <<= 1;
+        frame.fields.id_extended = (frame.fields.id_extended & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
+        count++;
+        if (count >= 18) {
+          count = 0;
+          state = RTR;
+        }
+      } else if (stuffing_state == STUFFING_ERROR) {
         count = 0;
+        state = ACTIVE_ERROR;
+        //ToDo
       }
+      
+      break;
+
+    case RTR:
+      stuffing_state = check_stuffing(ctx_bit);
+      if (stuffing_state == NO_STUFFING) {
+        frame.fields.rtr = ctx_bit;
+        state = R1;                
+      } else if (stuffing_state == STUFFING_ERROR) {
+        state = ACTIVE_ERROR;
+        //ToDo                                
+      }
+
+    case R1:
+      stuffing_state = check_stuffing(ctx_bit);
+      if (stuffing_state == NO_STUFFING) {
+        frame.fields.r1 = ctx_bit;
+        state = R0;
+      } else if (stuffing_state == STUFFING_ERROR) {
+        state = ACTIVE_ERROR;
+        //Todo
+      }     
       break;
 
     case R0:
-      frame.fields.r0 = sample_bit;
-      state = DLC;
-      break;
-
-    case R1:
-      frame.fields.r1 = sample_bit;
-      //arbitration = 0;
-      state = R0;
+      stuffing_state = check_stuffing(ctx_bit);
+      if (stuffing_state == NO_STUFFING) {
+        frame.fields.r0 = sample_bit;
+        state = DLC;
+      } else if (stuffing_state == STUFFING_ERROR) {
+        state = ACTIVE_ERROR;
+        //ToDo
+      }
       break;
 
     case DLC:
-      frame.fields.dlc <<= 1;
-      frame.fields.dlc = (frame.fields.dlc & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
-      count++;
-      if(count == 4 && frame.fields.rtr_srr == 0 && frame.fields.dlc > 0) {
-        state = DATA;
+      stuffing_state = check_stuffing(ctx_bit);
+      if (stuffing_state == NO_STUFFING) {
+        frame.fields.dlc <<= 1;
+        frame.fields.dlc |= (sample_bit == HIGH ? 0x1 : 0x0);
+        count++;
+        if ( count >= 4 ) {
+          if (frame.fields.rtr == LOW && frame.fields.dlc > 0) {
+            state = DATA;
+            count = 0;
+          } else if (frame.fields.rtr == HIGH || frame.fields.dlc == 0) {
+            state = CRC;
+            count = 0;
+          } // Else?
+        }
+      } else if (stuffing_state == STUFFING_ERROR) {
         count = 0;
-      } else {
-        state = CRC;
-        count = 0;
+        state = ACTIVE_ERROR;
+        //ToDo
       }
+
       break;
 
     case DATA:
-      if (count < 32){
-        frame.fields.data1 <<= 1;
-        frame.fields.data1 = (frame.fields.data1 & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
-      } else {
-        frame.fields.data2 <<= 1;
-        frame.fields.data2 = (frame.fields.data2 & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
+      stuffing_state = check_stuffing(ctx_bit);
+      if (stuffing_state == NO_STUFFING) {
+        if (count < 32){
+          frame.fields.data1 <<= 1;
+          frame.fields.data1 |= (sample_bit == HIGH ? 0x1 : 0x0);
+        } else {
+          frame.fields.data2 <<= 1;
+          frame.fields.data2 |= (sample_bit == HIGH ? 0x1 : 0x0);
+        }
+        count++;
+      } else if (stuffing_state == STUFFING_ERROR){
+        //ToDo
       }
-      count++;
+
       if(count == frame.fields.dlc*8) {
         state = CRC;
         count = 0;
@@ -447,24 +508,36 @@ void decoder_fsm() {
       break;
 
     case ACTIVE_ERROR:
-      //not requested, empty for now
+
       break;
 
   } // end of switch
 
+}
+
+
+int check_stuffing(int ctx_bit){
+  static int count = 0;
+  static int last_bit = HIGH;
+  int stuffing_state;
+  
+
+  if (count < 5) stuffing_state = NO_STUFFING;
+  else if (count == 5) stuffing_state = YES_STUFFING;
+  else stuffing_state = STUFFING_ERROR;
+
+
+  if (last_bit == ctx_bit) count++;
+  else count = 1;
+
+  last_bit = ctx_bit;
+  return stuffing_state;
 
 }
 
-void encode_decode() {
-static int count = 0;
-if (sample_bit == LOW && last_bit == HIGH){
-  //idle = DISABLED;
-}
+stuffing_state = check_stuffing(ctx_bit);
+  if (stuffing_state == NO_STUFFING) {
 
-decoder_fsm();
-}
+  } else if (stuffing_state == STUFFING_ERROR){
 
-bool get_stuffing(){
-  static int count;
-
-}
+  }
