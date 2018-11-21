@@ -55,6 +55,7 @@ FLAGS_VALUE sample_point = DISABLED;
 FLAGS_VALUE write_point = DISABLED;
 int sample_bit = HIGH;
 int write_bit = HIGH;
+int last_bit = HIGH;
 
 // Flags
 FLAGS_VALUE idle = ENABLED;
@@ -62,6 +63,13 @@ FLAGS_VALUE hard_sync = DISABLED;
 FLAGS_VALUE resync = DISABLED;
 FLAGS_VALUE arbitration = DISABLED;
 FLAGS_VALUE stuffing = DISABLED;
+
+FLAGS_VALUE idle_ss = ENABLED;
+FLAGS_VALUE hard_sync_ss = DISABLED;
+FLAGS_VALUE resync_ss = DISABLED;
+FLAGS_VALUE arbitration_ss = DISABLED;
+FLAGS_VALUE stuffing_ss = DISABLED;
+
 
 // Errors
 // Empty for now
@@ -107,8 +115,10 @@ void bit_timing();                              // Bit timing state machine
 void sample();                                  // Sampling logic
 void write();                                   // Writing logic
 void testWriteState(BIT_TIMING_STATES target);  // Tests - State pins logic
-void decode();                                  // Decoder state machine
+void decoder_fsm();                                  // Decoder state machine
 int check_crc();
+void encode_decode();
+bool get_stuffing();
 
 // Timer configuration
 void init_timer() {
@@ -150,15 +160,8 @@ void setup() {
 }
 
 void loop() {
-  // Where decoding/encoding/writing/sampling will be handled. Next task assignment
-  // if (write_point) {
-  // encode();
-  write();
-  // }
-  // if (sample_point) {
-  sample();
-  // decode();
-  // }
+  // Where decoding/encoding will be handled. Next task assignment
+  encode_decode();
 }
 
 void edge_detection() {
@@ -182,6 +185,10 @@ void bit_timing() {
   static BIT_TIMING_STATES state = DEFAULT_BTL_STATE;
   static int tq_count = 0;  // Counts from 0 to segment size
 
+  //first check write
+  write();
+
+  //second BTL
   switch (state){
     case BTL_SYNC:
       // Sync segment - always 1 tq long
@@ -243,6 +250,9 @@ void bit_timing() {
       break;
   }
 
+  // finally check sample
+  sample();
+
   tq_indicator = !tq_indicator;                                 // Tests - Toggle pin state
   digitalWrite(TQ_INDICATOR_PIN, (tq_indicator) ? HIGH : LOW);  // Tests - Write indicator to pin
   testWriteState(state);                                        // Tests - Write state to pins
@@ -264,19 +274,15 @@ void bit_timing() {
 }
 
 void sample() {
-  static int stuffing_count = 0;
-  static int last_read;
   if (sample_point == ENABLED) {
-    sample_bit = digitalRead(RX_PIN);
-    if (stuffing == ENABLED) {
-      if (last_read == sample_bit) stuffing_count++;
-      else stuffing_count = 0;
-    }
-    if(stuffing_count == 5) sample_bit = !sample_bit;
-    last_read = sample_bit;
-    sample_point = DISABLED;
-  }
+    //saving a screenshot of the flags
+    hard_sync_ss = hard_sync;
+    resync_ss = resync;
+    arbitration_ss = arbitration;
+    stuffing_ss = stuffing;
+    idle_ss = idle;
 
+    sample_bit = digitalRead(RX_PIN);
 }
 
 void write() {
@@ -301,7 +307,7 @@ void testWriteState(BIT_TIMING_STATES target) {
   }
 }
 
-void decode(){
+void decoder_fsm() {
   static DECODER_STATES state = DEFAULT_DECODER_STATE;
   static unsigned count = 0;
   
@@ -446,5 +452,19 @@ void decode(){
 
   } // end of switch
 
+
+}
+
+void encode_decode() {
+static int count = 0;
+if (sample_bit == LOW && last_bit == HIGH){
+  //idle = DISABLED;
+}
+
+decoder_fsm();
+}
+
+bool get_stuffing(){
+  static int count;
 
 }
