@@ -78,6 +78,7 @@ int hs_indicator = 0;
 int ss_indicator = 0;
 
 typedef struct Frame_fields {
+  unsigned start_of_frame     : 1;
   unsigned  id_standard       : 11;
   unsigned long  id_extended  : 18;
   unsigned rtr_srr            : 1;
@@ -302,12 +303,13 @@ void testWriteState(BIT_TIMING_STATES target) {
 
 void decode(){
   static DECODER_STATES state = DEFAULT_DECODER_STATE;
-  static unsigned id_count = 0, dlc_count = 0, data_count = 0, crc_count = 0, eof_count = 0, intermission_count = 0;
+  static unsigned count = 0;
   
+
   switch (state) {
     case IDLE:
       if (sample_bit == LOW) {
-        //idle = DISABLED; ?
+        frame.fields.start_of_frame = sample_bit;
         state = ID_STANDARD;
       }
       break;
@@ -318,13 +320,13 @@ void decode(){
       stuffing = ENABLED;
       frame.fields.id_standard <<= 1;
       frame.fields.id_standard = (frame.fields.id_standard & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
-      id_count++;
-      if ( id_count == 11) state = RTR_SRR;
+      count++;
+      if (count == 11) state = RTR_SRR;
       break;
 
     case RTR_SRR:
       frame.fields.rtr_srr = sample_bit;
-      if ( frame.fields.ide == 0) state = IDE;
+      if (frame.fields.ide == 0) state = IDE;
       else state = R1;
       break;
 
@@ -338,8 +340,11 @@ void decode(){
     case ID_EXTENDED:
       frame.fields.id_extended <<= 1;
       frame.fields.id_extended = (frame.fields.id_extended & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
-      id_count++;
-      if (id_count == 29) state = RTR_SRR;
+      count++;
+      if (count == 29) {
+        state = RTR_SRR;
+        count = 0;
+      }
       break;
 
     case R0:
@@ -356,28 +361,39 @@ void decode(){
     case DLC:
       frame.fields.dlc <<= 1;
       frame.fields.dlc = (frame.fields.dlc & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
-      dlc_count++;
-      if( dlc_count == 4 && frame.fields.rtr_srr == 0 && frame.fields.dlc > 0) state = DATA;
-      else state = CRC;
+      count++;
+      if(count == 4 && frame.fields.rtr_srr == 0 && frame.fields.dlc > 0) {
+        state = DATA;
+        count = 0;
+      } else {
+        state = CRC;
+        count = 0;
+      }
       break;
 
     case DATA:
-      if (data_count < 32){
+      if (count < 32){
         frame.fields.data1 <<= 1;
         frame.fields.data1 = (frame.fields.data1 & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
       } else {
         frame.fields.data2 <<= 1;
         frame.fields.data2 = (frame.fields.data2 & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
       }
-      data_count++;
-      if(data_count == frame.fields.dlc*8) state = CRC;
+      count++;
+      if(count == frame.fields.dlc*8) {
+        state = CRC;
+        count = 0;
+      }
       break;
 
     case CRC:
       frame.fields.crc <<= 1;
       frame.fields.crc = (frame.fields.crc & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
-      crc_count++;
-      if (crc_count == 15) state = CRC_DEL;
+      count++;
+      if (count == 15) {
+        state = CRC_DEL;
+        count = 0;
+      }
       break;
 
     case CRC_DEL:
@@ -403,26 +419,25 @@ void decode(){
     case _EOF:
       frame.fields.eof <<= 1;
       frame.fields.eof = (frame.fields.eof & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
-      eof_count++;
-      if (eof_count == 7) state = INTERMISSION;
+      count++;
+      if (count == 7) {
+        state = INTERMISSION;
+        count = 0;
+      }
       break;
 
     case INTERMISSION:
       frame.fields.intermission <<= 1;
       frame.fields.intermission = (frame.fields.intermission & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
-      intermission_count++;
-      if (intermission_count == 3 && sample_bit == 0){
+      count++;
+      if (count == 3 && sample_bit == 0){
         state = ID_STANDARD;
-        intermission_count = 0;
-      } else if (intermission_count == 3 && sample_bit == 1) {
+        count = 0;
+      } else if (count == 3 && sample_bit == 1) {
         state = IDLE;
-        intermission_count = 0;
+        count = 0;
       }
-      id_count = 0;
-      dlc_count = 0;
-      data_count = 0;
-      crc_count = 0;
-      eof_count = 0;
+      count = 0;
       break;
 
     case ACTIVE_ERROR:
