@@ -117,8 +117,9 @@ void sample();                                  // Sampling logic
 void write();                                   // Writing logic
 void testWriteState(BIT_TIMING_STATES target);  // Tests - State pins logic
 int check_crc();
-void jackson();
-void zerar_frame();
+void jackson(int sample_bit);
+void reset_frame();
+int check_stuffing(int sample_bit);
 
 // Timer configuration
 void init_timer() {
@@ -304,7 +305,7 @@ void jackson(int ctx_bit) {
     case IDLE:
       idle = ENABLED;
       if (ctx_bit == LOW) {
-        zerar_frame();
+        reset_frame();
         frame.fields.start_of_frame = ctx_bit;
         idle = DISABLED;
         arbitration = ENABLED;
@@ -401,7 +402,7 @@ void jackson(int ctx_bit) {
     case R0:
       stuffing_state = check_stuffing(ctx_bit);
       if (stuffing_state == NO_STUFFING) {
-        frame.fields.r0 = sample_bit;
+        frame.fields.r0 = ctx_bit;
         state = DLC;
       } else if (stuffing_state == STUFFING_ERROR) {
         state = ACTIVE_ERROR;
@@ -413,7 +414,7 @@ void jackson(int ctx_bit) {
       stuffing_state = check_stuffing(ctx_bit);
       if (stuffing_state == NO_STUFFING) {
         frame.fields.dlc <<= 1;
-        frame.fields.dlc |= (sample_bit == HIGH ? 0x1 : 0x0);
+        frame.fields.dlc |= (ctx_bit == HIGH ? 0x1 : 0x0);
         count++;
         if ( count >= 4 ) {
           if (frame.fields.rtr == LOW && frame.fields.dlc > 0) {
@@ -437,57 +438,67 @@ void jackson(int ctx_bit) {
       if (stuffing_state == NO_STUFFING) {
         if (count < 32){
           frame.fields.data1 <<= 1;
-          frame.fields.data1 |= (sample_bit == HIGH ? 0x1 : 0x0);
+          frame.fields.data1 |= (ctx_bit == HIGH ? 0x1 : 0x0);
         } else {
           frame.fields.data2 <<= 1;
-          frame.fields.data2 |= (sample_bit == HIGH ? 0x1 : 0x0);
+          frame.fields.data2 |= (ctx_bit == HIGH ? 0x1 : 0x0);
         }
         count++;
       } else if (stuffing_state == STUFFING_ERROR){
         //ToDo
       }
 
-      if(count == frame.fields.dlc*8) {
+      if(count >= frame.fields.dlc*8) {
         state = CRC;
         count = 0;
       }
       break;
 
     case CRC:
-      frame.fields.crc <<= 1;
-      frame.fields.crc = (frame.fields.crc & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
-      count++;
-      if (count == 15) {
+      stuffing_state = check_stuffing(ctx_bit);
+      if (stuffing_state == NO_STUFFING) {
+        frame.fields.crc <<= 1;
+        frame.fields.crc |= (ctx_bit == HIGH ? 0x1 : 0x0);
+        count++;
+      } else if (stuffing_state == STUFFING_ERROR){
+        //ToDo
+      }
+      if (count >= 15) {
         state = CRC_DEL;
         count = 0;
       }
       break;
 
+//From here stuffing disabled
     case CRC_DEL:
       stuffing = DISABLED;
-      //sample_stuff=0; ?
-      frame.fields.crc_del = sample_bit;
+      frame.fields.crc_del = ctx_bit;
       if (frame.fields.crc_del == 1) state = ACK_SLOT;
       else state = ACTIVE_ERROR;
       break;
 
     case ACK_SLOT:
-      frame.fields.ack_slot = sample_bit;
+      frame.fields.ack_slot = ctx_bit;
       if (frame.fields.ack_slot == 0) state = ACK_DEL;
       else state = ACTIVE_ERROR;
       break;
 
     case ACK_DEL:
-      frame.fields.ack_del = sample_bit;
+      frame.fields.ack_del = ctx_bit;
       if (frame.fields.ack_del != 1 || check_crc() ) state = ACTIVE_ERROR;
       else state = _EOF;
       break;
 
     case _EOF:
-      frame.fields.eof <<= 1;
-      frame.fields.eof = (frame.fields.eof & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
-      count++;
-      if (count == 7) {
+      stuffing_state = check_stuffing(ctx_bit);
+      if (stuffing_state == NO_STUFFING) {
+        frame.fields.eof <<= 1;
+        frame.fields.eof |= (ctx_bit == HIGH ? 0x1 : 0x0);
+        count++;
+      } else if (stuffing_state == STUFFING_ERROR){
+        //ToDo
+      }
+      if (count >= 7) {
         state = INTERMISSION;
         count = 0;
       }
@@ -495,12 +506,12 @@ void jackson(int ctx_bit) {
 
     case INTERMISSION:
       frame.fields.intermission <<= 1;
-      frame.fields.intermission = (frame.fields.intermission & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
+      frame.fields.intermission |= (ctx_bit == HIGH ? 0x1 : 0x0);
       count++;
-      if (count == 3 && sample_bit == 0){
+      if (count == 3 && ctx_bit == 0){
         state = ID_STANDARD;
         count = 0;
-      } else if (count == 3 && sample_bit == 1) {
+      } else if (count == 3 && ctx_bit == 1) {
         state = IDLE;
         count = 0;
       }
@@ -508,7 +519,7 @@ void jackson(int ctx_bit) {
       break;
 
     case ACTIVE_ERROR:
-
+      // :)
       break;
 
   } // end of switch
@@ -516,7 +527,7 @@ void jackson(int ctx_bit) {
 }
 
 
-int check_stuffing(int ctx_bit){
+int check_stuffing(int ctx_bit) {
   static int count = 0;
   static int last_bit = HIGH;
   int stuffing_state;
@@ -535,9 +546,10 @@ int check_stuffing(int ctx_bit){
 
 }
 
-stuffing_state = check_stuffing(ctx_bit);
-  if (stuffing_state == NO_STUFFING) {
+void reset_frame() {
+  memset(frame.raw, 0, 19);
+}
 
-  } else if (stuffing_state == STUFFING_ERROR){
-
-  }
+int check_crc() {
+  return 0;
+}
