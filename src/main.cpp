@@ -74,6 +74,7 @@ FLAGS_VALUE arbitration = DISABLED;
 FLAGS_VALUE stuffing = DISABLED;
 FLAGS_VALUE jackson_enable = DISABLED;
 FLAGS_VALUE crc_en = DISABLED;
+FLAGS_VALUE write_mode DISABLED;
 
 
 // Errors
@@ -310,6 +311,16 @@ void jackson(int ctx_bit) {
   if (crc_en == ENABLED) {
     update_crc(ctx_bit);
   }
+
+  if (arbitration == ENABLED) {
+    if (write_bit != ctx_bit) {
+      write_mode = DISABLED;
+    }
+  }else {
+    if (write_bit != ctx_bit) {
+      //??? error?
+    }
+  }
   switch (state) {
     case IDLE:
       idle = ENABLED;
@@ -335,9 +346,10 @@ void jackson(int ctx_bit) {
           state = RTR_SRR;
         }
       } else if (stuffing_state == STUFFING_ERROR) {
+        stuffing = DISABLED;
+        arbitration = DISABLED;
         count = 0;
         state = ACTIVE_ERROR;
-        //ToDo
       }
       break;
 
@@ -347,8 +359,10 @@ void jackson(int ctx_bit) {
         rtr_srr = ctx_bit;
         state = IDE;
       } else if (stuffing_state == STUFFING_ERROR) {
+        count = 0;
+        stuffing = DISABLED;
+        arbitration = DISABLED;
         state = ACTIVE_ERROR;
-        //ToDo
       }
       break;
 
@@ -365,8 +379,10 @@ void jackson(int ctx_bit) {
           state = R0;
         }
       } else if (stuffing_state == STUFFING_ERROR) {
+        count = 0;
+        stuffing = DISABLED;
+        arbitration = DISABLED;
         state = ACTIVE_ERROR;
-        //ToDo
       }
       break;
 
@@ -382,8 +398,9 @@ void jackson(int ctx_bit) {
         }
       } else if (stuffing_state == STUFFING_ERROR) {
         count = 0;
+        stuffing = DISABLED;
+        arbitration = DISABLED;
         state = ACTIVE_ERROR;
-        //ToDo
       }
       
       break;
@@ -394,8 +411,10 @@ void jackson(int ctx_bit) {
         frame.fields.rtr = ctx_bit;
         state = R1;                
       } else if (stuffing_state == STUFFING_ERROR) {
+        count = 0;
+        stuffing = DISABLED;
+        arbitration = DISABLED;
         state = ACTIVE_ERROR;
-        //ToDo                                
       }
 
     case R1:
@@ -404,8 +423,10 @@ void jackson(int ctx_bit) {
         frame.fields.r1 = ctx_bit;
         state = R0;
       } else if (stuffing_state == STUFFING_ERROR) {
+        count = 0;
+        stuffing = DISABLED;
+        arbitration = DISABLED;
         state = ACTIVE_ERROR;
-        //Todo
       }     
       break;
 
@@ -415,8 +436,10 @@ void jackson(int ctx_bit) {
         frame.fields.r0 = ctx_bit;
         state = DLC;
       } else if (stuffing_state == STUFFING_ERROR) {
+        count = 0;
+        stuffing = DISABLED;
+        arbitration = DISABLED;
         state = ACTIVE_ERROR;
-        //ToDo
       }
       break;
 
@@ -436,9 +459,10 @@ void jackson(int ctx_bit) {
           } // Else?
         }
       } else if (stuffing_state == STUFFING_ERROR) {
+        stuffing = DISABLED;
+        arbitration = DISABLED;
         count = 0;
         state = ACTIVE_ERROR;
-        //ToDo
       }
 
       break;
@@ -455,7 +479,10 @@ void jackson(int ctx_bit) {
         }
         count++;
       } else if (stuffing_state == STUFFING_ERROR){
-        //ToDo
+        count = 0;
+        stuffing = DISABLED;
+        arbitration = DISABLED;
+        state = ACTIVE_ERROR;
       }
 
       if(count >= frame.fields.dlc*8) {
@@ -472,44 +499,62 @@ void jackson(int ctx_bit) {
         frame.fields.crc |= (ctx_bit == HIGH ? 0x1 : 0x0);
         count++;
       } else if (stuffing_state == STUFFING_ERROR){
-        //ToDo
+        count = 0;
+        stuffing = DISABLED;
+        arbitration = DISABLED;
+        state = ACTIVE_ERROR;
       }
       if (count >= 15) {
         state = CRC_DEL;
-        if (crc != frame.fields.crc) state = ACTIVE_ERROR;
+        if (crc != frame.fields.crc) {
+          count = 0;
+          stuffing = DISABLED;
+          arbitration = DISABLED;
+          state = ACTIVE_ERROR;
+        }
         count = 0;
       }
       break;
 
-//From here stuffing disabled
+//From here stuffing is disabled
     case CRC_DEL:
       stuffing = DISABLED;
       frame.fields.crc_del = ctx_bit;
       if (frame.fields.crc_del == 1) state = ACK_SLOT;
-      else state = ACTIVE_ERROR;
+      else {
+        count = 0;
+        stuffing = DISABLED;
+        arbitration = DISABLED;
+        state = ACTIVE_ERROR;
+      }
       break;
 
     case ACK_SLOT:
       frame.fields.ack_slot = ctx_bit;
       if (frame.fields.ack_slot == 0) state = ACK_DEL;
-      else state = ACTIVE_ERROR;
+      else {
+        count = 0;
+        stuffing = DISABLED;
+        arbitration = DISABLED;
+        state = ACTIVE_ERROR;
+      }
       break;
 
     case ACK_DEL:
       frame.fields.ack_del = ctx_bit;
-      if (frame.fields.ack_del != 1 || check_crc() ) state = ACTIVE_ERROR;
+      if (frame.fields.ack_del != 1 ) {
+        count = 0;
+        stuffing = DISABLED;
+        arbitration = DISABLED;
+        state = ACTIVE_ERROR;
+        }
       else state = _EOF;
       break;
 
     case _EOF:
-      stuffing_state = check_stuffing(ctx_bit);
-      if (stuffing_state == NO_STUFFING) {
-        frame.fields.eof <<= 1;
-        frame.fields.eof |= (ctx_bit == HIGH ? 0x1 : 0x0);
-        count++;
-      } else if (stuffing_state == STUFFING_ERROR){
-        //ToDo
-      }
+      frame.fields.eof <<= 1;
+      frame.fields.eof |= (ctx_bit == HIGH ? 0x1 : 0x0);
+      count++;
       if (count >= 7) {
         state = INTERMISSION;
         count = 0;
@@ -531,7 +576,19 @@ void jackson(int ctx_bit) {
       break;
 
     case ACTIVE_ERROR:
-      // :)
+      count++; // verifico se sao recessivos?
+      if (count >= 6) {
+        count = 0;
+        state = PASSIVE_ERROR;
+      }
+      break;
+
+    case PASSIVE_ERROR:
+      count++;
+      if (ctx_bit == LOW || count >= 6) {
+        count = 0;
+        state = _EOF;
+      }
       break;
 
   } // end of switch
