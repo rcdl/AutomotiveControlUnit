@@ -21,11 +21,8 @@
 
 // CRC settings
 #define CRC_DIVISOR 0x4599
-typedef struct crc_settings {
-  unsigned reg : 15;
-} crc_rg;
+unsigned int crc = 0;
 
-crc_rg crc;
 // Pins
 const int RX_PIN = 3;  // From transceiver
 const int TX_PIN = 2;  // To transceiver
@@ -76,6 +73,7 @@ FLAGS_VALUE resync = DISABLED;
 FLAGS_VALUE arbitration = DISABLED;
 FLAGS_VALUE stuffing = DISABLED;
 FLAGS_VALUE jackson_enable = DISABLED;
+FLAGS_VALUE crc_en = DISABLED;
 
 
 // Errors
@@ -308,6 +306,10 @@ void jackson(int ctx_bit) {
   static int rtr_srr;
   int stuffing_state;
   
+
+  if (crc_en == ENABLED) {
+    update_crc(ctx_bit);
+  }
   switch (state) {
     case IDLE:
       idle = ENABLED;
@@ -317,6 +319,7 @@ void jackson(int ctx_bit) {
         idle = DISABLED;
         arbitration = ENABLED;
         stuffing = ENABLED;
+        crc_en = ENABLED;
         state = ID_STANDARD;
       }
       break;
@@ -456,6 +459,7 @@ void jackson(int ctx_bit) {
       }
 
       if(count >= frame.fields.dlc*8) {
+        crc_en = DISABLED;
         state = CRC;
         count = 0;
       }
@@ -472,6 +476,7 @@ void jackson(int ctx_bit) {
       }
       if (count >= 15) {
         state = CRC_DEL;
+        if (crc != frame.fields.crc) state = ACTIVE_ERROR;
         count = 0;
       }
       break;
@@ -555,8 +560,13 @@ int check_stuffing(int ctx_bit) {
 
 void reset_frame() {
   memset(frame.raw, 0, 19);
+  crc = 0;
 }
 
-int check_crc() {
-  return 0;
+void update_crc(int ctx_bit) {
+  int crc_next = ctx_bit ^ ((crc & 0x4000) >> 14);
+  crc <<= 1;
+  if (crc_next) {
+    crc ^= CRC_DIVISOR;
+  }
 }
