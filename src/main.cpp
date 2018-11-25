@@ -19,6 +19,13 @@
 #define YES_STUFFING 1
 #define STUFFING_ERROR 2
 
+// CRC settings
+#define CRC_DIVISOR 0x4599
+typedef struct crc_settings {
+  unsigned reg : 15;
+} crc_rg;
+
+crc_rg crc;
 // Pins
 const int RX_PIN = 3;  // From transceiver
 const int TX_PIN = 2;  // To transceiver
