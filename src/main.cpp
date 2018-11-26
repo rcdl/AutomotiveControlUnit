@@ -74,7 +74,7 @@ FLAGS_VALUE resync = DISABLED;
 FLAGS_VALUE arbitration = DISABLED;
 FLAGS_VALUE stuffing = DISABLED;
 FLAGS_VALUE jackson_enable = DISABLED;
-FLAGS_VALUE crc_en = DISABLED;
+FLAGS_VALUE crc_enable = DISABLED;
 FLAGS_VALUE write_mode = DISABLED;
 
 
@@ -85,14 +85,14 @@ FLAGS_VALUE write_mode = DISABLED;
 // Decoder/Encoder 
 typedef struct Frame_fields {
   unsigned start_of_frame     : 1;
-  unsigned  id_standard       : 11;
+  unsigned id_standard        : 11;
   unsigned rtr                : 1;
   unsigned r0                 : 11;
   unsigned ide                : 1;
   unsigned dlc                : 4;
   unsigned long data1         : 32;
   unsigned long data2         : 32;
-  unsigned long  id_extended  : 18;
+  unsigned long id_extended   : 18;
   unsigned srr                : 1;
   unsigned r1                 : 11;
   unsigned crc                : 15;
@@ -246,268 +246,208 @@ void bit_timing() {
 
 void sample() {
   sample_bit = digitalRead(RX_PIN);
+  Serial.print("Just sampled bit: ");
+  Serial.println(ctx_bit);
   jackson_enable = ENABLED;
 }
 
 void write() {
   digitalWrite(TX_PIN, write_bit);
+  Serial.print("Just wrote bit: ");
+  Serial.println(write_bit);
 }
 
 void jackson(int ctx_bit) {
   static DECODER_STATES state = DEFAULT_DECODER_STATE;
   static unsigned count = 0;
-  int stuffing_state;
-  
 
-  if (crc_en == ENABLED) {
+  if (stuffing) {
+    int stuffing_state = check_stuffing(ctx_bit);
+    if (stuffing_state == YES_STUFFING) {
+      Serial.println("Stuffing");
+      return;
+    } else if (stuffing_state == STUFFING_ERROR) {
+      stuffing = DISABLED;
+      arbitration = DISABLED;
+      crc_enable = DISABLED;
+      count = 0;
+      state = ACTIVE_ERROR;
+    }
+  }
+
+  if (crc_enable == ENABLED) {
     update_crc(ctx_bit);
   }
 
-  if (arbitration == ENABLED) {
-    if (write_bit != ctx_bit) {
-      write_mode = DISABLED;
-    }
-  }else {
-    if (write_bit != ctx_bit) {
-      //??? error?
-    }
-  }
+  // Encoder related 
+  // if (arbitration == ENABLED) {
+  //   if (write_bit != ctx_bit) {
+  //     write_mode = DISABLED;
+  //   }
+  // }else {
+  //   if (write_bit != ctx_bit) {
+  //     //??? error?
+  //   }
+  // }
 
-
-  Serial.print("Written bit: ");
-  Serial.print(write_bit);
-  Serial.print("\t|\t Sampled bit: ");
-  Serial.println(ctx_bit);
   switch (state) {
     case IDLE:
-      Serial.println("jackson state: IDLE");
       idle = ENABLED;
       if (ctx_bit == LOW) {
+        // Start of Frame
+        Serial.println("Current state: Start of Frame");
         reset_frame();
         frame.fields.start_of_frame = ctx_bit;
-        idle = DISABLED;
-        arbitration = ENABLED;
-        stuffing = ENABLED;
-        crc_en = ENABLED;
+        idle = DISABLED;          // Turn off Idle flag
+        arbitration = ENABLED;    // Turn on arbitration phase
+        stuffing = ENABLED;       // Enable stuffing check
+        crc_enable = ENABLED;     // Enable cyclic redundancy check
         state = ID_STANDARD;
+      } else {
+        Serial.println("Current state: Idle");
       }
       break;
 
     case ID_STANDARD:
-      Serial.println("jackson state: IDLE");
+      Serial.println("Current state: Identifier A");
 
-      stuffing_state = check_stuffing(ctx_bit);
-      if(stuffing_state == NO_STUFFING){
-        frame.fields.id_standard <<= 1;
-        frame.fields.id_standard |= (ctx_bit == HIGH ? 0x1 : 0x0);
-        count++;
-        if (count >= 11) {
-          count = 0;
-          state = RTR_SRR;
-        }
-      } else if (stuffing_state == STUFFING_ERROR) {
-        stuffing = DISABLED;
-        arbitration = DISABLED;
+      frame.fields.id_standard <<= 1;
+      frame.fields.id_standard |= (ctx_bit == HIGH ? 0x1 : 0x0);
+      count++;
+      if (count >= 11) {
         count = 0;
-        state = ACTIVE_ERROR;
+        state = RTR_SRR;
       }
       break;
 
     case RTR_SRR:
-      stuffing_state = check_stuffing(ctx_bit);
-      if(stuffing_state == NO_STUFFING){
-        rtr_srr = ctx_bit;
-        state = IDE;
-      } else if (stuffing_state == STUFFING_ERROR) {
-        count = 0;
-        stuffing = DISABLED;
-        arbitration = DISABLED;
-        state = ACTIVE_ERROR;
-      }
-      Serial.println("jackson state: RTR_SRR");
+      Serial.println("Current state: RTR(Standard) or SRR(Extended)");
+
+      rtr_srr = ctx_bit;
+      state = IDE;
       break;
 
     case IDE:
-      stuffing_state = check_stuffing(ctx_bit);
-      if (stuffing_state == NO_STUFFING) {
-        frame.fields.ide = ctx_bit;
-        if (ctx_bit == HIGH) { // extended frame
-          frame.fields.srr = rtr_srr;
-          state = ID_EXTENDED;
-        } else {  // standard
-          arbitration = DISABLED;
-          frame.fields.rtr = rtr_srr;
-          state = R0;
-        }
-      } else if (stuffing_state == STUFFING_ERROR) {
-        count = 0;
-        stuffing = DISABLED;
+      Serial.println("Current state: Identifier extension bit (IDE)");
+
+      frame.fields.ide = ctx_bit;
+      if (ctx_bit == HIGH) { // extended frame
+        frame.fields.srr = rtr_srr;
+        state = ID_EXTENDED;
+      } else {  // standard
         arbitration = DISABLED;
-        state = ACTIVE_ERROR;
+        frame.fields.rtr = rtr_srr;
+        state = R0;
       }
-      Serial.println("jackson state: IDE");
       break;
 
     case ID_EXTENDED:
-      stuffing_state = check_stuffing(ctx_bit);
-      if (stuffing_state == NO_STUFFING) {
-        frame.fields.id_extended <<= 1;
-        frame.fields.id_extended = (frame.fields.id_extended & 0x1) | (sample_bit == HIGH ? 0x1 : 0x0);
-        count++;
-        if (count >= 18) {
-          count = 0;
-          state = RTR;
-        }
-      } else if (stuffing_state == STUFFING_ERROR) {
+      Serial.println("Current state: Identifier B");
+
+      frame.fields.id_extended <<= 1;
+      frame.fields.id_extended |= (ctx_bit == HIGH ? 0x1 : 0x0);
+      count++;
+      if (count >= 18) {
         count = 0;
-        stuffing = DISABLED;
-        arbitration = DISABLED;
-        state = ACTIVE_ERROR;
+        state = RTR;
       }
-      Serial.println("jackson state: ID_EXTENDED");
       break;
 
     case RTR:
-      stuffing_state = check_stuffing(ctx_bit);
-      if (stuffing_state == NO_STUFFING) {
-        frame.fields.rtr = ctx_bit;
-        state = R1;                
-      } else if (stuffing_state == STUFFING_ERROR) {
-        count = 0;
-        stuffing = DISABLED;
-        arbitration = DISABLED;
-        state = ACTIVE_ERROR;
-      }
-      Serial.println("jackson state: RTR");
+      Serial.println("Current state: RTR(Extended)");
+
+      frame.fields.rtr = ctx_bit;
+      state = R1;                
       break;
 
     case R1:
-      stuffing_state = check_stuffing(ctx_bit);
-      if (stuffing_state == NO_STUFFING) {
-        frame.fields.r1 = ctx_bit;
-        state = R0;
-      } else if (stuffing_state == STUFFING_ERROR) {
-        count = 0;
-        stuffing = DISABLED;
-        arbitration = DISABLED;
-        state = ACTIVE_ERROR;
-      }
-      Serial.println("jackson state: R1");    
+      Serial.println("Current state: Reserved bit 1");
+
+      frame.fields.r1 = ctx_bit;
+      arbitration = DISABLED;
+      state = R0;
       break;
 
     case R0:
-      stuffing_state = check_stuffing(ctx_bit);
-      if (stuffing_state == NO_STUFFING) {
-        frame.fields.r0 = ctx_bit;
-        state = DLC;
-      } else if (stuffing_state == STUFFING_ERROR) {
-        count = 0;
-        stuffing = DISABLED;
-        arbitration = DISABLED;
-        state = ACTIVE_ERROR;
-      }
-      Serial.println("jackson state: R0");
+      Serial.println("Current state: Reserved bit 0");
+
+      frame.fields.r0 = ctx_bit;
+      state = DLC;
       break;
 
     case DLC:
-      stuffing_state = check_stuffing(ctx_bit);
-      if (stuffing_state == NO_STUFFING) {
-        frame.fields.dlc <<= 1;
-        frame.fields.dlc |= (ctx_bit == HIGH ? 0x1 : 0x0);
-        count++;
-        if ( count >= 4 ) {
-          if (frame.fields.rtr == LOW && frame.fields.dlc > 0) {
-            state = DATA;
-            count = 0;
-          } else if (frame.fields.rtr == HIGH || frame.fields.dlc == 0) {
-            state = CRC;
-            count = 0;
-          } // Else?
+      Serial.println("Current state: Data length code");
+
+      frame.fields.dlc <<= 1;
+      frame.fields.dlc |= (ctx_bit == HIGH ? 0x1 : 0x0);
+      count++;
+      if ( count >= 4 ) {
+        if (frame.fields.rtr == LOW && frame.fields.dlc > 0) {
+          state = DATA;
+          count = 0;
+        } else {  // if (frame.fields.rtr == HIGH || frame.fields.dlc == 0) 
+          state = CRC;
+          count = 0;
         }
-      } else if (stuffing_state == STUFFING_ERROR) {
-        stuffing = DISABLED;
-        arbitration = DISABLED;
-        count = 0;
-        state = ACTIVE_ERROR;
       }
-      Serial.println("jackson state: DLC");
       break;
 
     case DATA:
-      stuffing_state = check_stuffing(ctx_bit);
-      if (stuffing_state == NO_STUFFING) {
-        if (count < 32){
-          frame.fields.data1 <<= 1;
-          frame.fields.data1 |= (ctx_bit == HIGH ? 0x1 : 0x0);
-        } else {
-          frame.fields.data2 <<= 1;
-          frame.fields.data2 |= (ctx_bit == HIGH ? 0x1 : 0x0);
-        }
-        count++;
-      } else if (stuffing_state == STUFFING_ERROR){
-        count = 0;
-        stuffing = DISABLED;
-        arbitration = DISABLED;
-        state = ACTIVE_ERROR;
-      }
+      Serial.println("Current state: Data field");
 
+      if (count < 32){
+        frame.fields.data1 <<= 1;
+        frame.fields.data1 |= (ctx_bit == HIGH ? 0x1 : 0x0);
+      } else {
+        frame.fields.data2 <<= 1;
+        frame.fields.data2 |= (ctx_bit == HIGH ? 0x1 : 0x0);
+      }
+      count++;
       if(count >= frame.fields.dlc*8) {
-        crc_en = DISABLED;
+        crc_enable = DISABLED;
         state = CRC;
         count = 0;
       }
-      Serial.println("jackson state: DATA");
       break;
 
+    // From here needs review
     case CRC:
-      stuffing_state = check_stuffing(ctx_bit);
-      if (stuffing_state == NO_STUFFING) {
-        frame.fields.crc <<= 1;
-        frame.fields.crc |= (ctx_bit == HIGH ? 0x1 : 0x0);
-        count++;
-      } else if (stuffing_state == STUFFING_ERROR){
-        count = 0;
-        stuffing = DISABLED;
-        arbitration = DISABLED;
-        state = ACTIVE_ERROR;
-      }
+      Serial.println("Current state: Cyclic redundancy check");
+
+      frame.fields.crc <<= 1;
+      frame.fields.crc |= (ctx_bit == HIGH ? 0x1 : 0x0);
+      count++;
+      
       if (count >= 15) {
         state = CRC_DEL;
-        if (crc != frame.fields.crc) {
-          count = 0;
-          stuffing = DISABLED;
-          arbitration = DISABLED;
-          state = ACTIVE_ERROR;
-        }
         count = 0;
       }
-      Serial.println("jackson state: CRC");
+
       break;
 
-    //From here stuffing is disabled
     case CRC_DEL:
+      Serial.println("Current state: CRC delimiter");
+
       stuffing = DISABLED;
       frame.fields.crc_del = ctx_bit;
+
       if (frame.fields.crc_del == 1) state = ACK_SLOT;
-      else {
-        count = 0;
-        stuffing = DISABLED;
-        arbitration = DISABLED;
-        state = ACTIVE_ERROR;
-      }
-      Serial.println("jackson state: CRC_DEL");
+      else state = ACTIVE_ERROR;  // Form error
       break;
 
+    // From here stuffing is disabled
     case ACK_SLOT:
+      Serial.println("Current state: Acknowledgement");
+      
       frame.fields.ack_slot = ctx_bit;
-      if (frame.fields.ack_slot == 0) state = ACK_DEL;
+      if (crc != frame.fields.crc) state = ACTIVE_ERROR;
+      else if (frame.fields.ack_slot == 0) state = ACK_DEL;
       else {
         count = 0;
         stuffing = DISABLED;
         arbitration = DISABLED;
         state = ACTIVE_ERROR;
       }
-      Serial.println("jackson state: ACK_SLOT");
       break;
 
     case ACK_DEL:
@@ -606,22 +546,20 @@ void print_decoder(int rtr_srr, frame_union _frame) {
 }
 
 int check_stuffing(int ctx_bit) {
+  // Pode dar errado depois de rodar uma vez, por conta do SOF, chamar a função na transição de SOF pode resolver
   static int count = 0;
   static int last_bit = HIGH;
   int stuffing_state;
   
-
   if (count < 5) stuffing_state = NO_STUFFING;
   else if (count == 5) stuffing_state = YES_STUFFING;
   else stuffing_state = STUFFING_ERROR;
-
 
   if (last_bit == ctx_bit) count++;
   else count = 1;
 
   last_bit = ctx_bit;
   return stuffing_state;
-
 }
 
 void reset_frame() {
