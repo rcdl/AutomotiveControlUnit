@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <math.h>
 
 // Bit Timing settings
 #define PROP_SEG 1
@@ -74,35 +75,26 @@ FLAGS_VALUE arbitration = DISABLED;
 FLAGS_VALUE stuffing = DISABLED;
 FLAGS_VALUE jackson_enable = DISABLED;
 FLAGS_VALUE crc_en = DISABLED;
-FLAGS_VALUE write_mode DISABLED;
+FLAGS_VALUE write_mode = DISABLED;
 
 
 // Errors
 // Empty for now
 
-// Tests - pins and flags
-const int TQ_INDICATOR_PIN = 4;
-const int HARDSYNC_PIN = 5;
-const int SOFTSYNC_PIN = 6;
-const int STATE_HIGH_PIN = 7;
-const int STATE_LOW_PIN = 8;
-const int IDLE_TEST_PIN = 11;
-int tq_indicator = 0;
-int hs_indicator = 0;
-int ss_indicator = 0;
 
+// Decoder/Encoder 
 typedef struct Frame_fields {
   unsigned start_of_frame     : 1;
   unsigned  id_standard       : 11;
-  unsigned long  id_extended  : 18;
   unsigned rtr                : 1;
-  unsigned srr                : 1;
-  unsigned ide                : 1;
   unsigned r0                 : 11;
-  unsigned r1                 : 11;
+  unsigned ide                : 1;
   unsigned dlc                : 4;
   unsigned long data1         : 32;
   unsigned long data2         : 32;
+  unsigned long  id_extended  : 18;
+  unsigned srr                : 1;
+  unsigned r1                 : 11;
   unsigned crc                : 15;
   unsigned crc_del            : 1;
   unsigned ack_slot           : 1;
@@ -116,16 +108,40 @@ union frame_union {
   frame_fields fields;
 } frame;
 
+
+int rtr_srr = 0;
+
+// Tests - pins and flags
+#define STANDARD_FRAME 0
+#define EXTENDED_FRAME 1
+#define DATA_FRAME 0
+#define REMOTE_FRAME 1
+const int TQ_INDICATOR_PIN = 4;
+const int HARDSYNC_PIN = 5;
+const int SOFTSYNC_PIN = 6;
+const int STATE_HIGH_PIN = 7;
+const int STATE_LOW_PIN = 8;
+const int IDLE_TEST_PIN = 11;
+int tq_indicator = 0;
+int hs_indicator = 0;
+int ss_indicator = 0;
+unsigned test_crc = 0;
+
+
 // Prototype
 void edge_detection();                          // Callback to RX falling edges
 void bit_timing();                              // Bit timing state machine
 void sample();                                  // Sampling logic
 void write();                                   // Writing logic
 void testWriteState(BIT_TIMING_STATES target);  // Tests - State pins logic
-int check_crc();
-void jackson(int sample_bit);
-void reset_frame();
-int check_stuffing(int sample_bit);
+void update_crc(int ctx_bit);                   // Update the calculation of the CRC
+void jackson(int sample_bit);                   // Encoder/Decoder function
+void reset_frame();                             // Reset to 0 all fields of the frame
+int check_stuffing(int sample_bit);             // Check the bit stuffing
+void print_decoder(int rtr_srr, frame_union _frame);
+union frame_union create_test_frame(unsigned ide, unsigned rtr, unsigned id_std, unsigned long ext, unsigned long data1, unsigned long data2);
+void update_test_crc(unsigned long data, unsigned bits);
+
 
 // Timer configuration
 void init_timer() {
@@ -164,6 +180,8 @@ void setup() {
   digitalWrite(HARDSYNC_PIN, (hs_indicator) ? HIGH : LOW);
   digitalWrite(SOFTSYNC_PIN, (ss_indicator) ? HIGH : LOW);
   testWriteState(DEFAULT_BTL_STATE);
+
+  //test_frame = create_test_frame(STANDARD_FRAME, DATA_FRAME, 0x0D, 100);
 }
 
 void loop() {
@@ -304,7 +322,6 @@ void testWriteState(BIT_TIMING_STATES target) {
 void jackson(int ctx_bit) {
   static DECODER_STATES state = DEFAULT_DECODER_STATE;
   static unsigned count = 0;
-  static int rtr_srr;
   int stuffing_state;
   
 
@@ -321,8 +338,15 @@ void jackson(int ctx_bit) {
       //??? error?
     }
   }
+
+
+  Serial.print("Written bit: ");
+  Serial.print(write_bit);
+  Serial.print("\t|\t Sampled bit: ");
+  Serial.println(ctx_bit);
   switch (state) {
     case IDLE:
+      Serial.println("jackson state: IDLE");
       idle = ENABLED;
       if (ctx_bit == LOW) {
         reset_frame();
@@ -336,6 +360,8 @@ void jackson(int ctx_bit) {
       break;
 
     case ID_STANDARD:
+      Serial.println("jackson state: IDLE");
+
       stuffing_state = check_stuffing(ctx_bit);
       if(stuffing_state == NO_STUFFING){
         frame.fields.id_standard <<= 1;
@@ -364,6 +390,7 @@ void jackson(int ctx_bit) {
         arbitration = DISABLED;
         state = ACTIVE_ERROR;
       }
+      Serial.println("jackson state: RTR_SRR");
       break;
 
     case IDE:
@@ -384,6 +411,7 @@ void jackson(int ctx_bit) {
         arbitration = DISABLED;
         state = ACTIVE_ERROR;
       }
+      Serial.println("jackson state: IDE");
       break;
 
     case ID_EXTENDED:
@@ -402,7 +430,7 @@ void jackson(int ctx_bit) {
         arbitration = DISABLED;
         state = ACTIVE_ERROR;
       }
-      
+      Serial.println("jackson state: ID_EXTENDED");
       break;
 
     case RTR:
@@ -416,6 +444,8 @@ void jackson(int ctx_bit) {
         arbitration = DISABLED;
         state = ACTIVE_ERROR;
       }
+      Serial.println("jackson state: RTR");
+      break;
 
     case R1:
       stuffing_state = check_stuffing(ctx_bit);
@@ -427,7 +457,8 @@ void jackson(int ctx_bit) {
         stuffing = DISABLED;
         arbitration = DISABLED;
         state = ACTIVE_ERROR;
-      }     
+      }
+      Serial.println("jackson state: R1");    
       break;
 
     case R0:
@@ -441,6 +472,7 @@ void jackson(int ctx_bit) {
         arbitration = DISABLED;
         state = ACTIVE_ERROR;
       }
+      Serial.println("jackson state: R0");
       break;
 
     case DLC:
@@ -464,7 +496,7 @@ void jackson(int ctx_bit) {
         count = 0;
         state = ACTIVE_ERROR;
       }
-
+      Serial.println("jackson state: DLC");
       break;
 
     case DATA:
@@ -490,6 +522,7 @@ void jackson(int ctx_bit) {
         state = CRC;
         count = 0;
       }
+      Serial.println("jackson state: DATA");
       break;
 
     case CRC:
@@ -514,6 +547,7 @@ void jackson(int ctx_bit) {
         }
         count = 0;
       }
+      Serial.println("jackson state: CRC");
       break;
 
 //From here stuffing is disabled
@@ -527,6 +561,7 @@ void jackson(int ctx_bit) {
         arbitration = DISABLED;
         state = ACTIVE_ERROR;
       }
+      Serial.println("jackson state: CRC_DEL");
       break;
 
     case ACK_SLOT:
@@ -538,6 +573,7 @@ void jackson(int ctx_bit) {
         arbitration = DISABLED;
         state = ACTIVE_ERROR;
       }
+      Serial.println("jackson state: ACK_SLOT");
       break;
 
     case ACK_DEL:
@@ -549,6 +585,7 @@ void jackson(int ctx_bit) {
         state = ACTIVE_ERROR;
         }
       else state = _EOF;
+      Serial.println("jackson state: ACK_DEL");
       break;
 
     case _EOF:
@@ -559,6 +596,7 @@ void jackson(int ctx_bit) {
         state = INTERMISSION;
         count = 0;
       }
+      Serial.println("jackson state: EOF");
       break;
 
     case INTERMISSION:
@@ -573,6 +611,7 @@ void jackson(int ctx_bit) {
         count = 0;
       }
       count = 0;
+      Serial.println("jackson state: INTERMISSION");
       break;
 
     case ACTIVE_ERROR:
@@ -592,9 +631,45 @@ void jackson(int ctx_bit) {
       break;
 
   } // end of switch
-
+  print_decoder(rtr_srr, frame);
 }
 
+void print_decoder(int rtr_srr, frame_union _frame) {
+  Serial.print("SoF: ");
+  Serial.println(_frame.fields.start_of_frame, BIN);
+  Serial.print("ID: ");
+  Serial.println(_frame.fields.id_standard, BIN);
+  Serial.print("RTR_SRR: ");
+  Serial.println(rtr_srr, BIN);
+  Serial.print("IDE: ");
+  Serial.println(_frame.fields.ide, BIN);
+  Serial.print("ID: ");
+  Serial.println(_frame.fields.id_extended, BIN);
+  Serial.print("RTR: ");
+  Serial.println(_frame.fields.rtr, BIN);
+  Serial.print("R1: ");
+  Serial.println(_frame.fields.r1, BIN); 
+  Serial.print("R0: ");
+  Serial.println(_frame.fields.r0, BIN);
+  Serial.print("DLC: ");
+  Serial.println(_frame.fields.dlc, BIN);
+  Serial.print("DATA1: ");
+  Serial.println(_frame.fields.data1, BIN);
+  Serial.print("CRC: ");
+  Serial.print(_frame.fields.crc, BIN);
+  Serial.print("\tCRC_REG: ");
+  Serial.println(crc);
+  Serial.print("CRC_DEL: ");
+  Serial.println(_frame.fields.crc_del, BIN);
+  Serial.print("ACK_SLOT: ");
+  Serial.println(_frame.fields.ack_slot, BIN);
+  Serial.print("ACK_DEL: ");
+  Serial.println(_frame.fields.ack_del, BIN);
+  Serial.print("EOF: ");
+  Serial.println(_frame.fields.eof, BIN);
+  Serial.print("INTERMISSION: ");
+  Serial.println(_frame.fields.intermission, BIN);
+}
 
 int check_stuffing(int ctx_bit) {
   static int count = 0;
@@ -618,6 +693,7 @@ int check_stuffing(int ctx_bit) {
 void reset_frame() {
   memset(frame.raw, 0, 19);
   crc = 0;
+  rtr_srr = 0;
 }
 
 void update_crc(int ctx_bit) {
@@ -626,4 +702,51 @@ void update_crc(int ctx_bit) {
   if (crc_next) {
     crc ^= CRC_DIVISOR;
   }
+}
+
+frame_union create_test_frame(unsigned ide, unsigned rtr, unsigned id_std, unsigned long id_ext, unsigned long data1, unsigned long data2) {
+  frame_union test;
+
+  test.fields.start_of_frame = 0;
+  test.fields.ide = ide;
+  test.fields.rtr = rtr;
+  test.fields.r0 = 0;
+  test.fields.r1 = 0;
+  test.fields.data1 = data1;
+  test.fields.data2 = data2;
+  test.fields.dlc = ceil(data1/8.0) + ceil(data2/8.0);
+
+  if (ide == STANDARD_FRAME) {
+    test.fields.id_standard = id_std; 
+    update_test_crc(test.fields.id_standard, 11);
+    update_test_crc(test.fields.rtr, 1);
+    update_test_crc(test.fields.ide, 1);
+    update_test_crc(test.fields.r0, 1);
+    update_test_crc(test.fields.dlc, 4);
+    update_test_crc(test.fields.data1, test.fields.dlc*8);
+
+  } else {
+    test.fields.id_standard = id_std;
+    test.fields.id_extended = id_ext;
+    test.fields.srr = 1;
+
+  }
+
+
+
+  return test;
+}
+
+void update_test_crc(unsigned long data, unsigned bits) {
+  unsigned bit = 0;
+  for(int i = 0 ; i < bits; i++) {
+    bit = data | 0x1;
+    data >>= 1;
+    int crc_next = bit ^ ((test_crc & 0x4000) >> 14);
+    test_crc <<= 1;
+    if (crc_next) {
+      test_crc ^= CRC_DIVISOR;
+    }
+  }
+
 }
