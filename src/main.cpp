@@ -108,7 +108,6 @@ union frame_union {
   frame_fields fields;
 } frame;
 
-
 int rtr_srr = 0;
 
 // Tests - pins and flags
@@ -116,24 +115,13 @@ int rtr_srr = 0;
 #define EXTENDED_FRAME 1
 #define DATA_FRAME 0
 #define REMOTE_FRAME 1
-const int TQ_INDICATOR_PIN = 4;
-const int HARDSYNC_PIN = 5;
-const int SOFTSYNC_PIN = 6;
-const int STATE_HIGH_PIN = 7;
-const int STATE_LOW_PIN = 8;
-const int IDLE_TEST_PIN = 11;
-int tq_indicator = 0;
-int hs_indicator = 0;
-int ss_indicator = 0;
 unsigned test_crc = 0;
-
 
 // Prototype
 void edge_detection();                          // Callback to RX falling edges
 void bit_timing();                              // Bit timing state machine
 void sample();                                  // Sampling logic
 void write();                                   // Writing logic
-void testWriteState(BIT_TIMING_STATES target);  // Tests - State pins logic
 void update_crc(int ctx_bit);                   // Update the calculation of the CRC
 void jackson(int sample_bit);                   // Encoder/Decoder function
 void reset_frame();                             // Reset to 0 all fields of the frame
@@ -169,18 +157,6 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(RX_PIN), edge_detection, FALLING);
   init_timer();
 
-  // Tests
-  pinMode(TQ_INDICATOR_PIN, OUTPUT);
-  pinMode(HARDSYNC_PIN, OUTPUT);
-  pinMode(SOFTSYNC_PIN, OUTPUT);
-  pinMode(STATE_HIGH_PIN, OUTPUT);
-  pinMode(STATE_LOW_PIN, OUTPUT);
-  pinMode(IDLE_TEST_PIN, INPUT);
-  digitalWrite(TQ_INDICATOR_PIN, (tq_indicator) ? HIGH : LOW);
-  digitalWrite(HARDSYNC_PIN, (hs_indicator) ? HIGH : LOW);
-  digitalWrite(SOFTSYNC_PIN, (ss_indicator) ? HIGH : LOW);
-  testWriteState(DEFAULT_BTL_STATE);
-
   //test_frame = create_test_frame(STANDARD_FRAME, DATA_FRAME, 0x0D, 100);
 }
 
@@ -193,19 +169,12 @@ void loop() {
 }
 
 void edge_detection() {
-  // Tests - idle flag workaround. The decoder controls the idle flag and it's not implemented yet.
-  idle = digitalRead(IDLE_TEST_PIN) ? ENABLED : DISABLED;
-
   if (idle == ENABLED) {
     // Enables hard_sync flag if decoder is idle
     hard_sync = ENABLED;
-    hs_indicator = !hs_indicator;                             // Tests - Toggle pin state
-    digitalWrite(HARDSYNC_PIN, (hs_indicator) ? HIGH : LOW);  // Tests - Write indicator to pin
   } else {
     // Enables resync flag otherwise (decoder is busy)
     resync = ENABLED;
-    ss_indicator = !ss_indicator;                             // Tests - Toggle pin sate
-    digitalWrite(SOFTSYNC_PIN, (ss_indicator) ? HIGH : LOW);  // Tests - Write indicator to pin
   }
 }
 
@@ -273,26 +242,6 @@ void bit_timing() {
       }
       break;
   }
-
-
-  tq_indicator = !tq_indicator;                                 // Tests - Toggle pin state
-  digitalWrite(TQ_INDICATOR_PIN, (tq_indicator) ? HIGH : LOW);  // Tests - Write indicator to pin
-  testWriteState(state);                                        // Tests - Write state to pins
-
-  // Tests - To serialplotter
-  // Repeats for visibility
-  // Prints one line with separated values -> separated plots
-  // Adds different offsets so plots dont overlap
-  for(int i=0;i<10;i++) {
-    Serial.print(state);
-    Serial.print("\t");
-    Serial.print(tq_indicator + 4);
-    Serial.print("\t");
-    Serial.print(hs_indicator + 7);
-    Serial.print("\t");
-    Serial.println(ss_indicator + 10);
-  }
-
 }
 
 void sample() {
@@ -302,21 +251,6 @@ void sample() {
 
 void write() {
   digitalWrite(TX_PIN, write_bit);
-}
-
-void testWriteState(BIT_TIMING_STATES target) {
-  if (target == BTL_SYNC) {
-    digitalWrite(STATE_HIGH_PIN, LOW);
-    digitalWrite(STATE_LOW_PIN, LOW);
-  }
-  else if (target == BTL_SEG1) {
-    digitalWrite(STATE_HIGH_PIN, LOW);
-    digitalWrite(STATE_LOW_PIN, HIGH);
-  }
-  else if (target == BTL_SEG2) {
-    digitalWrite(STATE_HIGH_PIN, HIGH);
-    digitalWrite(STATE_LOW_PIN, LOW);
-  }
 }
 
 void jackson(int ctx_bit) {
@@ -550,7 +484,7 @@ void jackson(int ctx_bit) {
       Serial.println("jackson state: CRC");
       break;
 
-//From here stuffing is disabled
+    //From here stuffing is disabled
     case CRC_DEL:
       stuffing = DISABLED;
       frame.fields.crc_del = ctx_bit;
