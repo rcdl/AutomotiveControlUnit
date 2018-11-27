@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#include <math.h>
+#include <test_frames.h>
 
 // Bit Timing settings
 #define PROP_SEG 1
@@ -111,11 +111,11 @@ union frame_union {
 int rtr_srr = 0;
 
 // Tests - pins and flags
-#define STANDARD_FRAME 0
-#define EXTENDED_FRAME 1
 #define DATA_FRAME 0
 #define REMOTE_FRAME 1
-unsigned test_crc = 0;
+bool debug = true;
+int debug_count = 0;
+std_frame_union test_frame;
 
 // Prototype
 void edge_detection();                          // Callback to RX falling edges
@@ -127,8 +127,6 @@ void jackson(int sample_bit);                   // Encoder/Decoder function
 void reset_frame();                             // Reset to 0 all fields of the frame
 int check_stuffing(int sample_bit);             // Check the bit stuffing
 void print_decoder(int rtr_srr, frame_union _frame);
-union frame_union create_test_frame(unsigned ide, unsigned rtr, unsigned id_std, unsigned long ext, unsigned long data1, unsigned long data2);
-void update_test_crc(unsigned long data, unsigned bits);
 
 
 // Timer configuration
@@ -139,14 +137,17 @@ void init_timer() {
   TCCR1B |= (1<<CS10) | (1<<CS12);  // Tests - Sets prescaler to mode 5 (Fosc/1024): CS12 = 1, CS11 = 0, CS10 = 1
 
   TCNT1 = TIMERBASE;                // Offset, number of pulses to count
-  TCNT1 = 0xC2F7;                   // Tests - Offset to interrupt every second
+  //TCNT1 = 0xC2F7;                   // Tests - Offset to interrupt every second
+  TCNT1 = 0xDFF7;                   // Tests - Offset to interrupt every second
   TIMSK1 |= (1 << TOIE1);           // Enables timer interrupt
 }
 
 ISR(TIMER1_OVF_vect)  // TIMER1 interrupt
 {
   // TCNT1 = TIMERBASE;  // Resets timer
-  TCNT1 = 0xC2F7;     // Tests - Resets timer
+  //TCNT1 = 0xC2F7;     // Tests - Resets timer
+  TCNT1 = 0xDFF7;     // Tests - Resets timer
+
   bit_timing();
 }
 
@@ -157,7 +158,10 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(RX_PIN), edge_detection, FALLING);
   init_timer();
 
-  //test_frame = create_test_frame(STANDARD_FRAME, DATA_FRAME, 0x0D, 100);
+  //test_frame = create_test_stdframe(DATA_FRAME, 0x0D, 100, 0);
+  for(int i = 0; i < 14; i++) {
+    test_frame.raw[i] = 0xAA; //todos os bytes 1010 1010
+  }
 }
 
 void loop() {
@@ -245,9 +249,20 @@ void bit_timing() {
 }
 
 void sample() {
-  sample_bit = digitalRead(RX_PIN);
+  if (debug) {
+    sample_bit = test_frame.raw[debug_count/8] & 0x80;
+    Serial.print(debug_count/8);
+    Serial.print(":");
+    Serial.print(debug_count);
+    Serial.print("-> ");
+    Serial.println(test_frame.raw[0], HEX);
+    test_frame.raw[debug_count/8] >>= 1;
+    debug_count++;
+  } else {
+    sample_bit = digitalRead(RX_PIN);
+  }
   Serial.print("Just sampled bit: ");
-  Serial.println(ctx_bit);
+  Serial.println(sample_bit);
   jackson_enable = ENABLED;
 }
 
@@ -300,7 +315,8 @@ void jackson(int ctx_bit) {
         frame.fields.start_of_frame = ctx_bit;
         idle = DISABLED;          // Turn off Idle flag
         arbitration = ENABLED;    // Turn on arbitration phase
-        stuffing = ENABLED;       // Enable stuffing check
+        //stuffing = ENABLED;       // Enable stuffing check
+        stuffing = DISABLED;       // Enable stuffing check
         crc_enable = ENABLED;     // Enable cyclic redundancy check
         state = ID_STANDARD;
       } else {
@@ -541,7 +557,7 @@ void print_decoder(int rtr_srr, frame_union _frame) {
   Serial.println(_frame.fields.ack_del, BIN);
   Serial.print("EOF: ");
   Serial.println(_frame.fields.eof, BIN);
-  Serial.print("INTERMISSION: ");
+  Serial.print("INTERMISSION: \n");
   Serial.println(_frame.fields.intermission, BIN);
 }
 
@@ -562,6 +578,24 @@ int check_stuffing(int ctx_bit) {
   return stuffing_state;
 }
 
+int check_stuffing_test(int ctx_bit) {
+  // Pode dar errado depois de rodar uma vez, por conta do SOF, chamar a função na transição de SOF pode resolver
+  static int count = 0;
+  static int last_bit = HIGH;
+  int stuffing_state;
+  
+  if (count < 5) stuffing_state = NO_STUFFING;
+  else if (count == 5) stuffing_state = YES_STUFFING;
+  else stuffing_state = STUFFING_ERROR;
+
+  if (last_bit == ctx_bit) count++;
+  else count = 1;
+
+  last_bit = ctx_bit;
+  return stuffing_state;
+}
+
+
 void reset_frame() {
   memset(frame.raw, 0, 19);
   crc = 0;
@@ -574,51 +608,4 @@ void update_crc(int ctx_bit) {
   if (crc_next) {
     crc ^= CRC_DIVISOR;
   }
-}
-
-frame_union create_test_frame(unsigned ide, unsigned rtr, unsigned id_std, unsigned long id_ext, unsigned long data1, unsigned long data2) {
-  frame_union test;
-
-  test.fields.start_of_frame = 0;
-  test.fields.ide = ide;
-  test.fields.rtr = rtr;
-  test.fields.r0 = 0;
-  test.fields.r1 = 0;
-  test.fields.data1 = data1;
-  test.fields.data2 = data2;
-  test.fields.dlc = ceil(data1/8.0) + ceil(data2/8.0);
-
-  if (ide == STANDARD_FRAME) {
-    test.fields.id_standard = id_std; 
-    update_test_crc(test.fields.id_standard, 11);
-    update_test_crc(test.fields.rtr, 1);
-    update_test_crc(test.fields.ide, 1);
-    update_test_crc(test.fields.r0, 1);
-    update_test_crc(test.fields.dlc, 4);
-    update_test_crc(test.fields.data1, test.fields.dlc*8);
-
-  } else {
-    test.fields.id_standard = id_std;
-    test.fields.id_extended = id_ext;
-    test.fields.srr = 1;
-
-  }
-
-
-
-  return test;
-}
-
-void update_test_crc(unsigned long data, unsigned bits) {
-  unsigned bit = 0;
-  for(int i = 0 ; i < bits; i++) {
-    bit = data | 0x1;
-    data >>= 1;
-    int crc_next = bit ^ ((test_crc & 0x4000) >> 14);
-    test_crc <<= 1;
-    if (crc_next) {
-      test_crc ^= CRC_DIVISOR;
-    }
-  }
-
 }
