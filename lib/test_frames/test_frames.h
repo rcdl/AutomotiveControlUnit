@@ -73,3 +73,6 @@ void update_test_crc(unsigned long data, unsigned bits) {
 
 }
 
+/*                                            id B              ide  srr   id A     sof
+    10101010101010101010101010101010101010    101010101010101010 1    0  10101010101 0
+    */
