@@ -447,7 +447,7 @@ void jackson(int ctx_bit) {
       stuffing = DISABLED;
       frame.fields.crc_del = ctx_bit;
 
-      if (frame.fields.crc_del == 1) state = ACK_SLOT;
+      if (frame.fields.crc_del == HIGH) state = ACK_SLOT;
       else state = ACTIVE_ERROR;  // Form error
       break;
 
@@ -456,29 +456,20 @@ void jackson(int ctx_bit) {
       Serial.println("Current state: Acknowledgement");
       
       frame.fields.ack_slot = ctx_bit;
-      if (crc != frame.fields.crc) state = ACTIVE_ERROR;
-      else if (frame.fields.ack_slot == 0) state = ACK_DEL;
-      else {
-        count = 0;
-        stuffing = DISABLED;
-        arbitration = DISABLED;
-        state = ACTIVE_ERROR;
-      }
+      state = ACK_DEL;
       break;
 
     case ACK_DEL:
+      Serial.println("Current state: Acknowledgement delimiter");
+
       frame.fields.ack_del = ctx_bit;
-      if (frame.fields.ack_del != 1 ) {
-        count = 0;
-        stuffing = DISABLED;
-        arbitration = DISABLED;
-        state = ACTIVE_ERROR;
-        }
-      else state = _EOF;
-      Serial.println("jackson state: ACK_DEL");
+      // if (crc != frame.fields.crc) state = ACTIVE_ERROR;
+      state = _EOF;
       break;
 
     case _EOF:
+      Serial.println("Current state: End of frame");
+
       frame.fields.eof <<= 1;
       frame.fields.eof |= (ctx_bit == HIGH ? 0x1 : 0x0);
       count++;
@@ -486,22 +477,24 @@ void jackson(int ctx_bit) {
         state = INTERMISSION;
         count = 0;
       }
-      Serial.println("jackson state: EOF");
       break;
 
     case INTERMISSION:
+      Serial.println("Current state: Intermission");
+    
       frame.fields.intermission <<= 1;
       frame.fields.intermission |= (ctx_bit == HIGH ? 0x1 : 0x0);
       count++;
-      if (count == 3 && ctx_bit == 0){
-        state = ID_STANDARD;
+      if (count >= 3) {
         count = 0;
-      } else if (count == 3 && ctx_bit == 1) {
-        state = IDLE;
-        count = 0;
+        if(ctx_bit == HIGH) {
+          state = ID_STANDARD;
+        } else {
+          state = IDLE;
+          idle = ENABLED;
+        }
+        print_decoder(rtr_srr, frame);
       }
-      count = 0;
-      Serial.println("jackson state: INTERMISSION");
       break;
 
     case ACTIVE_ERROR:
@@ -520,8 +513,7 @@ void jackson(int ctx_bit) {
       }
       break;
 
-  } // end of switch
-  print_decoder(rtr_srr, frame);
+  }
 }
 
 void print_decoder(int rtr_srr, frame_union _frame) {
