@@ -71,10 +71,7 @@ int write_bit = HIGH;
 FLAGS_VALUE idle = ENABLED;
 FLAGS_VALUE hard_sync = DISABLED;
 FLAGS_VALUE resync = DISABLED;
-FLAGS_VALUE arbitration = DISABLED;
-FLAGS_VALUE stuffing = DISABLED;
 FLAGS_VALUE jackson_enable = DISABLED;
-FLAGS_VALUE crc_enable = DISABLED;
 FLAGS_VALUE write_mode = DISABLED;
 
 
@@ -118,6 +115,8 @@ int debug_count = 0;
 std_frame_union test_frame;
 bool print_decoder_states = false;
 bool print_once = true;
+
+
 // Prototype
 void edge_detection();                          // Callback to RX falling edges
 void bit_timing();                              // Bit timing state machine
@@ -128,6 +127,7 @@ void jackson(int sample_bit);                   // Encoder/Decoder function
 void reset_frame();                             // Reset to 0 all fields of the frame
 int check_stuffing(int sample_bit);             // Check the bit stuffing
 void print_decoder(frame_union _frame);
+int get_from_write_frame(bool with_stuffing);   // Next bit to send with/out stuffing
 
 
 // Timer configuration
@@ -279,245 +279,296 @@ void write() {
 void jackson(int ctx_bit) {
   static DECODER_STATES state = DEFAULT_DECODER_STATE;
   static unsigned count = 0;
-
-  if (stuffing) {
-    int stuffing_state = check_stuffing(ctx_bit);
-    if (stuffing_state == YES_STUFFING) {
-      Serial.println("STUFFFFFFIIIINNNNNGGGGGG");
-      return;
-    } else if (stuffing_state == STUFFING_ERROR) {
-      stuffing = DISABLED;
-      arbitration = DISABLED;
-      crc_enable = DISABLED;
+  static FLAGS_VALUE arbitration = DISABLED;
+  static FLAGS_VALUE stuffing = DISABLED;
+  static FLAGS_VALUE crc_enable = DISABLED;
+  static FLAGS_VALUE read_mode = ENABLED;
+  static FLAGS_VALUE conditional_write = DISABLED;
+  
+  // Arbitration handling
+  if (write_mode == ENABLED && idle == DISABLED && ctx_bit != write_bit) {  // TODO: Handle Nack
+    if (arbitration == ENABLED) write_mode = DISABLED;
+    else {
       count = 0;
-      state = ACTIVE_ERROR;
+      stuffing = DISABLED;
+      crc_enable = DISABLED;
+      state = ACTIVE_ERROR;  // Bit error
+      read_mode = DISABLED;
+      conditional_write = ENABLED;
     }
   }
 
-  if (crc_enable == ENABLED) {
-    update_crc(ctx_bit);
+  // Stuffing handling
+  if (stuffing == ENABLED) {
+    int stuffing_state = check_stuffing(ctx_bit);
+    if (stuffing_state == YES_STUFFING) {
+      Serial.println("Stuffing");
+      read_mode = DISABLED;
+    } else if (stuffing_state == STUFFING_ERROR) {
+      count = 0;
+      stuffing = DISABLED;
+      crc_enable = DISABLED;
+      arbitration = DISABLED;
+      state = ACTIVE_ERROR;
+      read_mode = DISABLED;
+      conditional_write = ENABLED;
+    }
   }
 
-  // Encoder related 
-  // if (arbitration == ENABLED) {
-  //   if (write_bit != ctx_bit) {
-  //     write_mode = DISABLED;
-  //   }
-  // }else {
-  //   if (write_bit != ctx_bit) {
-  //     //??? error?
-  //   }
-  // }
+  if (read_mode == ENABLED) {  // Destuffed bits
+    if (crc_enable == ENABLED) {
+      update_crc(ctx_bit);
+    }
 
-  switch (state) {
-    case IDLE:
-      idle = ENABLED;
-      if (ctx_bit == LOW) {
-        // Start of Frame
-        if(print_decoder_states)Serial.println("\t\t\t\tCurrent state: Start of Frame");
-        reset_frame();
-        frame.fields.start_of_frame = ctx_bit;
-        idle = DISABLED;          // Turn off Idle flag
-        arbitration = ENABLED;    // Turn on arbitration phase
-        stuffing = ENABLED;       // Enable stuffing check
-        crc_enable = ENABLED;     // Enable cyclic redundancy check
-        state = ID_STANDARD;
-      } else {
-        if(print_decoder_states)Serial.println("\t\t\t\tCurrent state: Idle");
-      }
-      break;
+    switch (state) {
+      case IDLE:
+        idle = ENABLED;
+        if (ctx_bit == LOW) {
+          // Start of Frame
+          if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: Start of Frame");
+          reset_frame();
+          frame.fields.start_of_frame = ctx_bit;
+          idle = DISABLED;          // Turn off Idle flag
+          arbitration = ENABLED;    // Turn on arbitration phase
+          stuffing = ENABLED;       // Enable stuffing check
+          crc_enable = ENABLED;     // Enable cyclic redundancy check
+          state = ID_STANDARD;
+        } else {
+          if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: Idle");
+        }
+        break;
 
-    case ID_STANDARD:
-      if(print_decoder_states)Serial.println("\t\t\t\tCurrent state: Identifier A");
+      case ID_STANDARD:
+        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: Identifier A");
 
-      frame.fields.id_standard <<= 1;
-      frame.fields.id_standard |= (ctx_bit == HIGH ? 0x1 : 0x0);
-      count++;
-      if (count >= 11) {
-        count = 0;
-        state = RTR_SRR;
-      }
-      break;
-
-    case RTR_SRR:
-      if(print_decoder_states)Serial.println("\t\t\t\tCurrent state: RTR(Standard) or SRR(Extended)");
-
-      rtr_srr = ctx_bit;
-      state = IDE;
-      break;
-
-    case IDE:
-      if(print_decoder_states)Serial.println("\t\t\t\tCurrent state: Identifier extension bit (IDE)");
-
-      frame.fields.ide = ctx_bit;
-      if (ctx_bit == HIGH) { // extended frame
-        frame.fields.srr = rtr_srr;
-        state = ID_EXTENDED;
-      } else {  // standard
-        arbitration = DISABLED;
-        frame.fields.rtr = rtr_srr;
-        state = R0;
-      }
-      break;
-
-    case ID_EXTENDED:
-      if(print_decoder_states)Serial.println("\t\t\t\tCurrent state: Identifier B");
-
-      frame.fields.id_extended <<= 1;
-      frame.fields.id_extended |= (ctx_bit == HIGH ? 0x1 : 0x0);
-      count++;
-      if (count >= 18) {
-        count = 0;
-        state = RTR;
-      }
-      break;
-
-    case RTR:
-      if(print_decoder_states)Serial.println("\t\t\t\tCurrent state: RTR(Extended)");
-
-      frame.fields.rtr = ctx_bit;
-      state = R1;                
-      break;
-
-    case R1:
-      if(print_decoder_states)Serial.println("\t\t\t\tCurrent state: Reserved bit 1");
-
-      frame.fields.r1 = ctx_bit;
-      arbitration = DISABLED;
-      state = R0;
-      break;
-
-    case R0:
-      if(print_decoder_states)Serial.println("\t\t\t\tCurrent state: Reserved bit 0");
-
-      frame.fields.r0 = ctx_bit;
-      state = DLC;
-      break;
-
-    case DLC:
-      if(print_decoder_states)Serial.println("\t\t\t\tCurrent state: Data length code");
-
-      frame.fields.dlc <<= 1;
-      frame.fields.dlc |= (ctx_bit == HIGH ? 0x1 : 0x0);
-      count++;
-      if ( count >= 4 ) {
-        if (frame.fields.rtr == LOW && frame.fields.dlc > 0) {
-          state = DATA;
+        frame.fields.id_standard <<= 1;
+        frame.fields.id_standard |= (ctx_bit == HIGH ? 0x1 : 0x0);
+        count++;
+        if (count >= 11) {
           count = 0;
-        } else {  // if (frame.fields.rtr == HIGH || frame.fields.dlc == 0) 
+          state = RTR_SRR;
+        }
+        break;
+
+      case RTR_SRR:
+        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: RTR(Standard) or SRR(Extended)");
+
+        rtr_srr = ctx_bit;
+        state = IDE;
+        break;
+
+      case IDE:
+        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: Identifier extension bit (IDE)");
+
+        frame.fields.ide = ctx_bit;
+        if (ctx_bit == HIGH) { // extended frame
+          frame.fields.srr = rtr_srr;
+          state = ID_EXTENDED;
+        } else {  // standard
+          arbitration = DISABLED;
+          frame.fields.rtr = rtr_srr;
+          state = R0;
+        }
+        break;
+
+      case ID_EXTENDED:
+        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: Identifier B");
+
+        frame.fields.id_extended <<= 1;
+        frame.fields.id_extended |= (ctx_bit == HIGH ? 0x1 : 0x0);
+        count++;
+        if (count >= 18) {
+          count = 0;
+          state = RTR;
+        }
+        break;
+
+      case RTR:
+        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: RTR(Extended)");
+
+        frame.fields.rtr = ctx_bit;
+        state = R1;                
+        break;
+
+      case R1:
+        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: Reserved bit 1");
+
+        frame.fields.r1 = ctx_bit;
+        arbitration = DISABLED;
+        state = R0;
+        break;
+
+      case R0:
+        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: Reserved bit 0");
+
+        frame.fields.r0 = ctx_bit;
+        state = DLC;
+        break;
+
+      case DLC:
+        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: Data length code");
+
+        frame.fields.dlc <<= 1;
+        frame.fields.dlc |= (ctx_bit == HIGH ? 0x1 : 0x0);
+        count++;
+        if ( count >= 4 ) {
+          if (frame.fields.rtr == LOW && frame.fields.dlc > 0) {
+            state = DATA;
+            count = 0;
+          } else {  // if (frame.fields.rtr == HIGH || frame.fields.dlc == 0) 
+            state = CRC;
+            count = 0;
+          }
+        }
+        break;
+
+      case DATA:
+        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: Data field");
+
+        if (count < 32){
+          frame.fields.data1 <<= 1;
+          frame.fields.data1 |= (ctx_bit == HIGH ? 0x1 : 0x0);
+        } else {
+          frame.fields.data2 <<= 1;
+          frame.fields.data2 |= (ctx_bit == HIGH ? 0x1 : 0x0);
+        }
+        count++;
+        if(count >= frame.fields.dlc*8) {
+          crc_enable = DISABLED;
           state = CRC;
           count = 0;
         }
-      }
-      break;
+        break;
 
-    case DATA:
-      if(print_decoder_states)Serial.println("\t\t\t\tCurrent state: Data field");
+      // From here needs review
+      case CRC:
+        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: Cyclic redundancy check");
 
-      if (count < 32){
-        frame.fields.data1 <<= 1;
-        frame.fields.data1 |= (ctx_bit == HIGH ? 0x1 : 0x0);
-      } else {
-        frame.fields.data2 <<= 1;
-        frame.fields.data2 |= (ctx_bit == HIGH ? 0x1 : 0x0);
-      }
-      count++;
-      if(count >= frame.fields.dlc*8) {
-        crc_enable = DISABLED;
-        state = CRC;
-        count = 0;
-      }
-      break;
-
-    // From here needs review
-    case CRC:
-      if(print_decoder_states)Serial.println("\t\t\t\tCurrent state: Cyclic redundancy check");
-
-      frame.fields.crc <<= 1;
-      frame.fields.crc |= (ctx_bit == HIGH ? 0x1 : 0x0);
-      count++;
-      
-      if (count >= 15) {
-        state = CRC_DEL;
-        count = 0;
-      }
-
-      break;
-
-    case CRC_DEL:
-      if(print_decoder_states)Serial.println("\t\t\t\tCurrent state: CRC delimiter");
-
-      stuffing = DISABLED;
-      frame.fields.crc_del = ctx_bit;
-
-      if (frame.fields.crc_del == HIGH) state = ACK_SLOT;
-      else state = ACTIVE_ERROR;  // Form error
-      break;
-
-    // From here stuffing is disabled
-    case ACK_SLOT:
-      if(print_decoder_states)Serial.println("\t\t\tCurrent state: Acknowledgement");
-      
-      frame.fields.ack_slot = ctx_bit;
-      state = ACK_DEL;
-      break;
-
-    case ACK_DEL:
-      if(print_decoder_states)Serial.println("\t\t\t\tCurrent state: Acknowledgement delimiter");
-
-      frame.fields.ack_del = ctx_bit;
-      // if (crc != frame.fields.crc) state = ACTIVE_ERROR;
-      state = _EOF;
-      break;
-
-    case _EOF:
-      if(print_decoder_states)Serial.println("\t\t\t\tCurrent state: End of frame");
-
-      frame.fields.eof <<= 1;
-      frame.fields.eof |= (ctx_bit == HIGH ? 0x1 : 0x0);
-      count++;
-      if (count >= 7) {
-        state = INTERMISSION;
-        count = 0;
-      }
-      break;
-
-    case INTERMISSION:
-      if(print_decoder_states)Serial.println("\t\t\t\tCurrent state: Intermission");
-    
-      frame.fields.intermission <<= 1;
-      frame.fields.intermission |= (ctx_bit == HIGH ? 0x1 : 0x0);
-      count++;
-      if (count >= 3) {
-        count = 0;
-        if(ctx_bit == HIGH) {
-          state = ID_STANDARD;
-        } else {
-          state = IDLE;
-          idle = ENABLED;
+        frame.fields.crc <<= 1;
+        frame.fields.crc |= (ctx_bit == HIGH ? 0x1 : 0x0);
+        count++;
+        
+        if (count >= 15) {
+          state = CRC_DEL;
+          count = 0;
         }
-      }
-      break;
+        break;
 
-    case ACTIVE_ERROR:
-      count++; // verifico se sao recessivos?
-      if (count >= 6) {
-        count = 0;
-        state = PASSIVE_ERROR;
-      }
-      break;
+      case CRC_DEL:
+        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: CRC delimiter");
 
-    case PASSIVE_ERROR:
-      count++;
-      if (ctx_bit == LOW || count >= 6) {
-        count = 0;
+        stuffing = DISABLED;
+        frame.fields.crc_del = ctx_bit;
+
+        if (frame.fields.crc_del == HIGH) state = ACK_SLOT;
+        else {
+          state = ACTIVE_ERROR;  // Form error
+          conditional_write = ENABLED;
+        }
+        break;
+
+      // From here stuffing is disabled
+      case ACK_SLOT:
+        if(print_decoder_states) Serial.println("\t\t\tCurrent state: Acknowledgement");
+        
+        frame.fields.ack_slot = ctx_bit;
+        state = ACK_DEL;
+        break;
+
+      case ACK_DEL:
+        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: Acknowledgement delimiter");
+
+        frame.fields.ack_del = ctx_bit;
+        // if (crc != frame.fields.crc) state = ACTIVE_ERROR;
         state = _EOF;
-      }
-      break;
+        break;
 
+      case _EOF:
+        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: End of frame");
+
+        frame.fields.eof <<= 1;
+        frame.fields.eof |= (ctx_bit == HIGH ? 0x1 : 0x0);
+        count++;
+        if (count >= 7) {
+          state = INTERMISSION;
+          count = 0;
+        }
+        break;
+
+      case INTERMISSION:
+        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: Intermission");
+      
+        frame.fields.intermission <<= 1;
+        frame.fields.intermission |= (ctx_bit == HIGH ? 0x1 : 0x0);
+        count++;
+        if (count >= 3) {
+          count = 0;
+          if(ctx_bit == HIGH) {
+            state = ID_STANDARD;
+          } else {
+            state = IDLE;
+            idle = ENABLED;
+          }
+        }
+        break;
+
+      case ACTIVE_ERROR:
+        count++; // verifico se sao recessivos?
+        conditional_write = ENABLED;
+        if (count >= 6) {
+          count = 0;
+          state = PASSIVE_ERROR;
+        }
+        break;
+
+      case PASSIVE_ERROR:
+        count++;
+        write_bit = HIGH;
+        if (ctx_bit == LOW || count >= 6) {
+          count = 0;
+          state = _EOF;
+        }
+        break;
+      
+    }
   }
 
-  //print_decoder(rtr_srr, frame);
+  if (write_mode == ENABLED || conditional_write == ENABLED) {
+    switch(state) {
+      case IDLE:
+      case ACTIVE_ERROR:
+        write_bit = LOW;
+        break;
+      case ID_STANDARD:
+      case RTR_SRR:
+      case IDE:
+      case ID_EXTENDED:
+      case RTR:
+      case R1:
+      case R0:
+      case DLC:
+      case DATA:
+        write_bit = get_from_write_frame(true);
+        break;
+      case CRC:
+        write_bit = get_from_write_frame(false);
+        break;
+      case CRC_DEL:
+      case ACK_DEL:
+      case _EOF:
+      case INTERMISSION:
+      case PASSIVE_ERROR:
+        write_bit = HIGH;
+        break;
+      case ACK_SLOT:
+        write_bit = (crc == frame.fields.crc ? LOW : HIGH);
+        break;
+    }
+  }
+
+  read_mode = ENABLED;
+  conditional_write = DISABLED;
+  // print_decoder(frame);
 }
 
 void print_decoder(frame_union _frame) {
@@ -616,4 +667,8 @@ void update_crc(int ctx_bit) {
   if (crc_next) {
     crc ^= CRC_DIVISOR;
   }
+}
+
+int get_from_write_frame(bool with_stuffing) {
+  return 1;
 }
