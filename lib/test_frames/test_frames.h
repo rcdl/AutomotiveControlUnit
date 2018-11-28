@@ -2,6 +2,7 @@
 
 
 
+
 typedef struct Std_frame_fields {
   unsigned start_of_frame     : 1;
   unsigned id_standard        : 11;
@@ -73,6 +74,6 @@ void update_test_crc(unsigned long data, unsigned bits) {
 
 }
 
-/*                                            id B              ide  srr   id A     sof
-    10101010101010101010101010101010101010    101010101010101010 1    0  10101010101 0
-    */
+char packet1[] = "0110011100100001000101010101010101010101010101010101010101010101010101010101010101000001000010100011011111111q";
+
+ 
