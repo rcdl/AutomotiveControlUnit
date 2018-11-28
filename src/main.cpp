@@ -123,6 +123,7 @@ void update_crc(int ctx_bit);                   // Update the calculation of the
 void jackson(int sample_bit);                   // Encoder/Decoder function
 void reset_frame();                             // Reset to 0 all fields of the frame
 int check_stuffing(int sample_bit);             // Check the bit stuffing
+int get_from_write_frame(bool with_stuffing);   // Next bit to send with/out stuffing
 void print_decoder(int rtr_srr, frame_union _frame);
 
 
@@ -279,15 +280,18 @@ void jackson(int ctx_bit) {
   static FLAGS_VALUE stuffing = DISABLED;
   static FLAGS_VALUE crc_enable = DISABLED;
   static FLAGS_VALUE read_mode = ENABLED;
+  static FLAGS_VALUE conditional_write = DISABLED;
   
   // Arbitration handling
-  if (write_mode == ENABLED && idle == DISABLED && ctx_bit != write_bit) {
+  if (write_mode == ENABLED && idle == DISABLED && ctx_bit != write_bit) {  // TODO: Handle Nack
     if (arbitration == ENABLED) write_mode = DISABLED;
     else {
       count = 0;
       stuffing = DISABLED;
       crc_enable = DISABLED;
       state = ACTIVE_ERROR;  // Bit error
+      read_mode = DISABLED;
+      conditional_write = ENABLED;
     }
   }
 
@@ -303,6 +307,8 @@ void jackson(int ctx_bit) {
       crc_enable = DISABLED;
       arbitration = DISABLED;
       state = ACTIVE_ERROR;
+      read_mode = DISABLED;
+      conditional_write = ENABLED;
     }
   }
 
@@ -454,7 +460,10 @@ void jackson(int ctx_bit) {
         frame.fields.crc_del = ctx_bit;
 
         if (frame.fields.crc_del == HIGH) state = ACK_SLOT;
-        else state = ACTIVE_ERROR;  // Form error
+        else {
+          state = ACTIVE_ERROR;  // Form error
+          conditional_write = ENABLED;
+        }
         break;
 
       // From here stuffing is disabled
@@ -505,6 +514,7 @@ void jackson(int ctx_bit) {
 
       case ACTIVE_ERROR:
         count++; // verifico se sao recessivos?
+        conditional_write = ENABLED;
         if (count >= 6) {
           count = 0;
           state = PASSIVE_ERROR;
@@ -513,6 +523,7 @@ void jackson(int ctx_bit) {
 
       case PASSIVE_ERROR:
         count++;
+        write_bit = HIGH;
         if (ctx_bit == LOW || count >= 6) {
           count = 0;
           state = _EOF;
@@ -522,7 +533,41 @@ void jackson(int ctx_bit) {
     }
   }
 
+  if (write_mode == ENABLED || conditional_write == ENABLED) {
+    switch(state) {
+      case IDLE:
+      case ACTIVE_ERROR:
+        write_bit = LOW;
+        break;
+      case ID_STANDARD:
+      case RTR_SRR:
+      case IDE:
+      case ID_EXTENDED:
+      case RTR:
+      case R1:
+      case R0:
+      case DLC:
+      case DATA:
+        write_bit = get_from_write_frame(true);
+        break;
+      case CRC:
+        write_bit = get_from_write_frame(false);
+        break;
+      case CRC_DEL:
+      case ACK_DEL:
+      case _EOF:
+      case INTERMISSION:
+      case PASSIVE_ERROR:
+        write_bit = HIGH;
+        break;
+      case ACK_SLOT:
+        write_bit = (crc == frame.fields.crc ? LOW : HIGH);
+        break;
+    }
+  }
+
   read_mode = ENABLED;
+  conditional_write = DISABLED;
   print_decoder(rtr_srr, frame);
 }
 
