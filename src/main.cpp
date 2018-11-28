@@ -71,10 +71,7 @@ int write_bit = HIGH;
 FLAGS_VALUE idle = ENABLED;
 FLAGS_VALUE hard_sync = DISABLED;
 FLAGS_VALUE resync = DISABLED;
-FLAGS_VALUE arbitration = DISABLED;
-FLAGS_VALUE stuffing = DISABLED;
 FLAGS_VALUE jackson_enable = DISABLED;
-FLAGS_VALUE crc_enable = DISABLED;
 FLAGS_VALUE write_mode = DISABLED;
 
 
@@ -278,7 +275,22 @@ void write() {
 void jackson(int ctx_bit) {
   static DECODER_STATES state = DEFAULT_DECODER_STATE;
   static unsigned count = 0;
+  static FLAGS_VALUE arbitration = DISABLED;
+  static FLAGS_VALUE stuffing = DISABLED;
+  static FLAGS_VALUE crc_enable = DISABLED;
+  
+  // Arbitration handling
+  if (write_mode == ENABLED && idle == DISABLED && ctx_bit != write_bit) {
+    if (arbitration == ENABLED) write_mode = DISABLED;
+    else {
+      count = 0;
+      stuffing = DISABLED;
+      crc_enable = DISABLED;
+      state = ACTIVE_ERROR;  // Bit error
+    }
+  }
 
+  // Stuffing handling
   if (stuffing) {
     int stuffing_state = check_stuffing(ctx_bit);
     if (stuffing_state == YES_STUFFING) {
