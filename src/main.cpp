@@ -113,8 +113,9 @@ int rtr_srr = 0;
 bool debug = true;
 int debug_count = 0;
 std_frame_union test_frame;
-bool print_decoder_states = false;
+bool print_decoder_states = true;
 bool print_once = true;
+char *test_packet = packet19;
 
 
 // Prototype
@@ -253,8 +254,8 @@ void bit_timing() {
 
 void sample() {
   if (debug) {
-    if (packet1[debug_count] != 'q') {
-      sample_bit = packet1[debug_count] == '1' ? 1 : 0;
+    if (test_packet[debug_count] != 'q') {
+      sample_bit = test_packet[debug_count] == '1' ? 1 : 0;
       debug_count++;
     } else {
       if (print_once) {
@@ -265,8 +266,10 @@ void sample() {
   } else {
     sample_bit = digitalRead(RX_PIN);
   }
-  //Serial.print("Just sampled bit: ");
-  //Serial.println(sample_bit);
+  if( print_once) {
+    //Serial.print("Just sampled bit: ");
+    Serial.print(sample_bit);
+  }
   jackson_enable = ENABLED;
 }
 
@@ -325,7 +328,7 @@ void jackson(int ctx_bit) {
         idle = ENABLED;
         if (ctx_bit == LOW) {
           // Start of Frame
-          if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: Start of Frame");
+          if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: Start of Frame");
           reset_frame();
           frame.fields.start_of_frame = ctx_bit;
           idle = DISABLED;          // Turn off Idle flag
@@ -334,12 +337,12 @@ void jackson(int ctx_bit) {
           crc_enable = ENABLED;     // Enable cyclic redundancy check
           state = ID_STANDARD;
         } else {
-          if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: Idle");
+          if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: Idle");
         }
         break;
 
       case ID_STANDARD:
-        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: Identifier A");
+        if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: Identifier A");
 
         frame.fields.id_standard <<= 1;
         frame.fields.id_standard |= (ctx_bit == HIGH ? 0x1 : 0x0);
@@ -351,14 +354,14 @@ void jackson(int ctx_bit) {
         break;
 
       case RTR_SRR:
-        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: RTR(Standard) or SRR(Extended)");
+        if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: RTR(Standard) or SRR(Extended)");
 
         rtr_srr = ctx_bit;
         state = IDE;
         break;
 
       case IDE:
-        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: Identifier extension bit (IDE)");
+        if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: Identifier extension bit (IDE)");
 
         frame.fields.ide = ctx_bit;
         if (ctx_bit == HIGH) { // extended frame
@@ -372,7 +375,7 @@ void jackson(int ctx_bit) {
         break;
 
       case ID_EXTENDED:
-        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: Identifier B");
+        if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: Identifier B");
 
         frame.fields.id_extended <<= 1;
         frame.fields.id_extended |= (ctx_bit == HIGH ? 0x1 : 0x0);
@@ -384,14 +387,14 @@ void jackson(int ctx_bit) {
         break;
 
       case RTR:
-        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: RTR(Extended)");
+        if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: RTR(Extended)");
 
         frame.fields.rtr = ctx_bit;
         state = R1;                
         break;
 
       case R1:
-        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: Reserved bit 1");
+        if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: Reserved bit 1");
 
         frame.fields.r1 = ctx_bit;
         arbitration = DISABLED;
@@ -399,14 +402,14 @@ void jackson(int ctx_bit) {
         break;
 
       case R0:
-        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: Reserved bit 0");
+        if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: Reserved bit 0");
 
         frame.fields.r0 = ctx_bit;
         state = DLC;
         break;
 
       case DLC:
-        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: Data length code");
+        if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: Data length code");
 
         frame.fields.dlc <<= 1;
         frame.fields.dlc |= (ctx_bit == HIGH ? 0x1 : 0x0);
@@ -416,6 +419,7 @@ void jackson(int ctx_bit) {
             state = DATA;
             count = 0;
           } else {  // if (frame.fields.rtr == HIGH || frame.fields.dlc == 0) 
+            crc_enable = DISABLED;
             state = CRC;
             count = 0;
           }
@@ -423,7 +427,7 @@ void jackson(int ctx_bit) {
         break;
 
       case DATA:
-        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: Data field");
+        if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: Data field");
 
         if (count < 32){
           frame.fields.data1 <<= 1;
@@ -433,7 +437,7 @@ void jackson(int ctx_bit) {
           frame.fields.data2 |= (ctx_bit == HIGH ? 0x1 : 0x0);
         }
         count++;
-        if(count >= frame.fields.dlc*8) {
+        if(count >= min(frame.fields.dlc*8, 64)) {
           crc_enable = DISABLED;
           state = CRC;
           count = 0;
@@ -442,7 +446,7 @@ void jackson(int ctx_bit) {
 
       // From here needs review
       case CRC:
-        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: Cyclic redundancy check");
+        if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: Cyclic redundancy check");
 
         frame.fields.crc <<= 1;
         frame.fields.crc |= (ctx_bit == HIGH ? 0x1 : 0x0);
@@ -455,7 +459,7 @@ void jackson(int ctx_bit) {
         break;
 
       case CRC_DEL:
-        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: CRC delimiter");
+        if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: CRC delimiter");
 
         stuffing = DISABLED;
         frame.fields.crc_del = ctx_bit;
@@ -469,14 +473,14 @@ void jackson(int ctx_bit) {
 
       // From here stuffing is disabled
       case ACK_SLOT:
-        if(print_decoder_states) Serial.println("\t\t\tCurrent state: Acknowledgement");
+        if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: Acknowledgement");
         
         frame.fields.ack_slot = ctx_bit;
         state = ACK_DEL;
         break;
 
       case ACK_DEL:
-        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: Acknowledgement delimiter");
+        if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: Acknowledgement delimiter");
 
         frame.fields.ack_del = ctx_bit;
         // if (crc != frame.fields.crc) state = ACTIVE_ERROR;
@@ -484,7 +488,7 @@ void jackson(int ctx_bit) {
         break;
 
       case _EOF:
-        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: End of frame");
+        if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: End of frame");
 
         frame.fields.eof <<= 1;
         frame.fields.eof |= (ctx_bit == HIGH ? 0x1 : 0x0);
@@ -496,7 +500,7 @@ void jackson(int ctx_bit) {
         break;
 
       case INTERMISSION:
-        if(print_decoder_states) Serial.println("\t\t\t\tCurrent state: Intermission");
+        if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: Intermission");
       
         frame.fields.intermission <<= 1;
         frame.fields.intermission |= (ctx_bit == HIGH ? 0x1 : 0x0);
@@ -576,8 +580,8 @@ void print_decoder(frame_union _frame) {
   Serial.println(_frame.fields.start_of_frame, BIN);
   Serial.print("ID A: ");
   Serial.println(_frame.fields.id_standard, HEX);
-  // Serial.print("RTR_SRR: ");
-  // Serial.println(rtr_srr, DEC);
+  Serial.print("SRR: ");
+  Serial.println(_frame.fields.srr, DEC);
   Serial.print("IDE: ");
   Serial.println(_frame.fields.ide, DEC);
   Serial.print("ID B: ");
@@ -612,20 +616,20 @@ void print_decoder(frame_union _frame) {
 
 int check_stuffing(int ctx_bit) {
   // Pode dar errado depois de rodar uma vez, por conta do SOF, chamar a função na transição de SOF pode resolver
-  static int count = 0;
-  static int last_bit = HIGH;
+  static int count = 1;
+  static int last_bit = LOW;
   int stuffing_state;
   
   if (count < 5) stuffing_state = NO_STUFFING;
   else if (count == 5) stuffing_state = YES_STUFFING;
   else stuffing_state = STUFFING_ERROR;
-  /*Serial.print("stuffing count: ");
+  /*Serial.print(" stf_cnt: ");
   Serial.print(count);
-  Serial.print("\tlast bit: ");
+  Serial.print(" stf_lst: ");
   Serial.print(last_bit);
-  Serial.print("\tsample bit: ");
+  Serial.print(" smp_bt: ");
   Serial.print(ctx_bit);
-  Serial.print("\tstuffing state: ");
+  Serial.print(" stf_st: ");
   Serial.println(stuffing_state);*/
 
 
