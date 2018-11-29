@@ -62,8 +62,6 @@ enum DECODER_STATES{
 };
 
 // Writing and sampling
-FLAGS_VALUE sample_point = DISABLED; 
-FLAGS_VALUE write_point = DISABLED;
 int sample_bit = HIGH;
 int write_bit = HIGH;
 
@@ -72,26 +70,23 @@ FLAGS_VALUE idle = ENABLED;
 FLAGS_VALUE hard_sync = DISABLED;
 FLAGS_VALUE resync = DISABLED;
 FLAGS_VALUE jackson_enable = DISABLED;
-FLAGS_VALUE write_mode = DISABLED;
-
 
 // Errors
 // Empty for now
-
 
 // Decoder/Encoder 
 typedef struct Frame_fields {
   unsigned start_of_frame     : 1;
   unsigned id_standard        : 11;
-  unsigned rtr                : 1;
-  unsigned r0                 : 11;
+  unsigned srr                : 1;
   unsigned ide                : 1;
+  unsigned long id_extended   : 18;
+  unsigned rtr                : 1;
+  unsigned r1                 : 11;
+  unsigned r0                 : 11;
   unsigned dlc                : 4;
   unsigned long data1         : 32;
   unsigned long data2         : 32;
-  unsigned long id_extended   : 18;
-  unsigned srr                : 1;
-  unsigned r1                 : 11;
   unsigned crc                : 15;
   unsigned crc_del            : 1;
   unsigned ack_slot           : 1;
@@ -119,19 +114,19 @@ char *test_packet = packet19;
 
 
 // Prototype
-void edge_detection();                          // Callback to RX falling edges
 void bit_timing();                              // Bit timing state machine
+void edge_detection();                          // Callback to RX falling edges
 void sample();                                  // Sampling logic
 void write();                                   // Writing logic
-void update_crc(int ctx_bit);                   // Update the calculation of the CRC
 void jackson(int sample_bit);                   // Encoder/Decoder function
-void reset_frame();                             // Reset to 0 all fields of the frame
-int check_stuffing(int sample_bit);             // Check the bit stuffing
 void print_decoder(frame_union _frame);
+int check_stuffing(int sample_bit);             // Check the bit stuffing
+void reset_frame();                             // Reset to 0 all fields of the frame
+void update_crc(int ctx_bit);                   // Update the calculation of the CRC
 int get_from_write_frame(bool with_stuffing);   // Next bit to send with/out stuffing
 
 
-// Timer configuration
+// Timer settings
 void init_timer() {
   TCCR1A = 0;                       // Sets timer to normal operation, pins OC1A and OC1B desconnected
   TCCR1B = 0;                       // Clean register
@@ -140,19 +135,20 @@ void init_timer() {
 
   //TCNT1 = TIMERBASE;                // Offset, number of pulses to count
   //TCNT1 = 0xC2F7;                   // Tests - Offset to interrupt every second
-  TCNT1 = 0xFFC7;                   // Tests - Offset to interrupt every second
+  TCNT1 = 0xFFC7;                   // Tests - Offset to interrupt
   TIMSK1 |= (1 << TOIE1);           // Enables timer interrupt
 }
 
 ISR(TIMER1_OVF_vect)  // TIMER1 interrupt
 {
   //TCNT1 = TIMERBASE;  // Resets timer
-  //TCNT1 = 0xC2F7;     // Tests - Resets timer
+  //TCNT1 = 0xC2F7;     // Tests - Resets timer every second
   TCNT1 = 0xFFC7;     // Tests - Resets timer
 
   bit_timing();
 }
 
+// Main arduino
 void setup() {
   Serial.begin(9600);
   pinMode(RX_PIN, INPUT);
@@ -176,16 +172,7 @@ void loop() {
   }
 }
 
-void edge_detection() {
-  if (idle == ENABLED) {
-    // Enables hard_sync flag if decoder is idle
-    hard_sync = ENABLED;
-  } else {
-    // Enables resync flag otherwise (decoder is busy)
-    resync = ENABLED;
-  }
-}
-
+// Functions
 void bit_timing() {
   static BIT_TIMING_STATES state = DEFAULT_BTL_STATE;
   static int tq_count = 0;  // Counts from 0 to segment size
@@ -252,6 +239,16 @@ void bit_timing() {
   }
 }
 
+void edge_detection() {
+  if (idle == ENABLED) {
+    // Enables hard_sync flag if decoder is idle
+    hard_sync = ENABLED;
+  } else {
+    // Enables resync flag otherwise (decoder is busy)
+    resync = ENABLED;
+  }
+}
+
 void sample() {
   if (debug) {
     if (test_packet[debug_count] != 'q') {
@@ -287,6 +284,7 @@ void jackson(int ctx_bit) {
   static FLAGS_VALUE crc_enable = DISABLED;
   static FLAGS_VALUE read_mode = ENABLED;
   static FLAGS_VALUE conditional_write = DISABLED;
+  static FLAGS_VALUE write_mode = DISABLED;
   
   // Arbitration handling
   if (write_mode == ENABLED && idle == DISABLED && ctx_bit != write_bit) {  // TODO: Handle Nack
@@ -572,7 +570,6 @@ void jackson(int ctx_bit) {
 
   read_mode = ENABLED;
   conditional_write = DISABLED;
-  // print_decoder(frame);
 }
 
 void print_decoder(frame_union _frame) {
@@ -615,7 +612,6 @@ void print_decoder(frame_union _frame) {
 }
 
 int check_stuffing(int ctx_bit) {
-  // Pode dar errado depois de rodar uma vez, por conta do SOF, chamar a função na transição de SOF pode resolver
   static int count = 1;
   static int last_bit = LOW;
   int stuffing_state;
@@ -632,32 +628,12 @@ int check_stuffing(int ctx_bit) {
   Serial.print(" stf_st: ");
   Serial.println(stuffing_state);*/
 
-
-
   if (last_bit == ctx_bit) count++;
   else count = 1;
 
   last_bit = ctx_bit;
   return stuffing_state;
 }
-
-int check_stuffing_test(int ctx_bit) {
-  // Pode dar errado depois de rodar uma vez, por conta do SOF, chamar a função na transição de SOF pode resolver
-  static int count = 0;
-  static int last_bit = HIGH;
-  int stuffing_state;
-  
-  if (count < 5) stuffing_state = NO_STUFFING;
-  else if (count == 5) stuffing_state = YES_STUFFING;
-  else stuffing_state = STUFFING_ERROR;
-
-  if (last_bit == ctx_bit) count++;
-  else count = 1;
-
-  last_bit = ctx_bit;
-  return stuffing_state;
-}
-
 
 void reset_frame() {
   memset(frame.raw, 0, 19);
