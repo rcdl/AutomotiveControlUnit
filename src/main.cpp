@@ -119,6 +119,8 @@ char form_error[] = "FORM ERROR";
 char stuff_error[] = "STUFFING ERROR";
 char no_error[] = "NO ERROR";
 char *error = no_error;
+const int WRITE_CTRL_PIN = 5;
+FLAGS_VALUE manual_write = DISABLED;
 
 
 // Prototype
@@ -132,6 +134,7 @@ int check_stuffing(int sample_bit);             // Check the bit stuffing
 void reset_frame();                             // Reset to 0 all fields of the frame
 void update_crc(int ctx_bit);                   // Update the calculation of the CRC
 int get_from_write_frame(bool with_stuffing);   // Next bit to send with/out stuffing
+void write_manual_control();                    // Tests
 
 
 // Timer settings
@@ -164,6 +167,9 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(RX_PIN), edge_detection, FALLING);
   init_timer();
 
+  // Tests
+  pinMode(WRITE_CTRL_PIN, INPUT);
+  attachInterrupt(digitalPinToInterrupt(WRITE_CTRL_PIN), write_manual_control, FALLING);
   test_frame = create_test_stdframe(DATA_FRAME, 0x0D, 100, 0);
   memset(test_frame.raw, 0, 14);
   for(int i = 0; i < 14; i++) {
@@ -569,6 +575,12 @@ void jackson(int ctx_bit) {
     }
   }
 
+  // May write
+  if (state == IDLE && manual_write == ENABLED) {
+    manual_write = DISABLED;
+    write_mode = ENABLED;
+  }
+
   if (write_mode == ENABLED || conditional_write == ENABLED) {
     switch(state) {
       case IDLE:
@@ -692,4 +704,8 @@ void update_crc(int ctx_bit) {
 
 int get_from_write_frame(bool with_stuffing) {
   return 1;
+}
+
+void write_manual_control() {
+  manual_write = ENABLED;
 }
