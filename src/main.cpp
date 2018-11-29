@@ -93,6 +93,8 @@ typedef struct Frame_fields {
   unsigned ack_del            : 1;
   unsigned eof                : 7;
   unsigned intermission       : 3;
+  unsigned active_error       : 6;
+  unsigned passive_error      : 6;
 } frame_fields;
 
 union frame_union {
@@ -111,6 +113,12 @@ std_frame_union test_frame;
 bool print_decoder_states = true;
 bool print_once = true;
 char *test_packet = packet19;
+char ack_error[] = "ACK ERROR";
+char crc_error[] = "CRC ERROR";
+char form_error[] = "FORM ERROR";
+char stuff_error[] = "STUFFING ERROR";
+char no_error[] = "NO ERROR";
+char *error = no_error;
 
 
 // Prototype
@@ -303,7 +311,7 @@ void jackson(int ctx_bit) {
   if (stuffing == ENABLED) {
     int stuffing_state = check_stuffing(ctx_bit);
     if (stuffing_state == YES_STUFFING) {
-      Serial.println("Stuffing");
+      Serial.println("-> Stuffed");
       read_mode = DISABLED;
     } else if (stuffing_state == STUFFING_ERROR) {
       count = 0;
@@ -311,6 +319,7 @@ void jackson(int ctx_bit) {
       crc_enable = DISABLED;
       arbitration = DISABLED;
       state = ACTIVE_ERROR;
+      error = stuff_error;
       read_mode = DISABLED;
       conditional_write = ENABLED;
     }
@@ -465,24 +474,32 @@ void jackson(int ctx_bit) {
         if (frame.fields.crc_del == HIGH) state = ACK_SLOT;
         else {
           state = ACTIVE_ERROR;  // Form error
+          error = form_error;
           conditional_write = ENABLED;
         }
         break;
 
       // From here stuffing is disabled
       case ACK_SLOT:
-        if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: Acknowledgement");
+        if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: Acknowledgement slot");
         
         frame.fields.ack_slot = ctx_bit;
         state = ACK_DEL;
+        if (ctx_bit == HIGH) {
+          state = ACTIVE_ERROR;
+          error = ack_error;
+        }
         break;
 
       case ACK_DEL:
         if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: Acknowledgement delimiter");
 
         frame.fields.ack_del = ctx_bit;
-        // if (crc != frame.fields.crc) state = ACTIVE_ERROR;
         state = _EOF;
+        if (crc != frame.fields.crc) {
+          state = ACTIVE_ERROR;
+          error = crc_error;
+        }
         break;
 
       case _EOF:
@@ -503,9 +520,18 @@ void jackson(int ctx_bit) {
         frame.fields.intermission <<= 1;
         frame.fields.intermission |= (ctx_bit == HIGH ? 0x1 : 0x0);
         count++;
-        if (count >= 3) {
+        if(count == 3 && ctx_bit == LOW) {
+          if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: Start of Frame");
+          reset_frame();
+          frame.fields.start_of_frame = ctx_bit;
+          idle = DISABLED;          // Turn off Idle flag
+          arbitration = ENABLED;    // Turn on arbitration phase
+          stuffing = ENABLED;       // Enable stuffing check
+          crc_enable = ENABLED;     // Enable cyclic redundancy check
+          state = ID_STANDARD;
+        } else if (count >= 3) {
           count = 0;
-          if(ctx_bit == HIGH) {
+          if(ctx_bit == LOW) {
             state = ID_STANDARD;
           } else {
             state = IDLE;
@@ -515,7 +541,11 @@ void jackson(int ctx_bit) {
         break;
 
       case ACTIVE_ERROR:
-        count++; // verifico se sao recessivos?
+        if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: Active Error ");
+        
+        frame.fields.active_error <<= 1;
+        frame.fields.active_error |= (ctx_bit == HIGH ? 0x1 : 0x0);
+        count++; 
         conditional_write = ENABLED;
         if (count >= 6) {
           count = 0;
@@ -524,9 +554,13 @@ void jackson(int ctx_bit) {
         break;
 
       case PASSIVE_ERROR:
+        if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: Passive Error");
+        
+        frame.fields.passive_error <<= 1;
+        frame.fields.passive_error |= (ctx_bit == HIGH ? 0x1 : 0x0);
         count++;
         write_bit = HIGH;
-        if (ctx_bit == LOW || count >= 6) {
+        if (ctx_bit == HIGH || count >= 6) {
           count = 0;
           state = _EOF;
         }
@@ -609,6 +643,12 @@ void print_decoder(frame_union _frame) {
   Serial.println(_frame.fields.eof, BIN);
   Serial.print("INTERMISSION: ");
   Serial.println(_frame.fields.intermission, BIN);
+  Serial.println(); // </br>
+  Serial.println(error);
+  Serial.print("ACTIVE_ERROR: ");
+  Serial.println(_frame.fields.active_error, BIN);
+  Serial.print("PASSIVE_ERROR: ");
+  Serial.println(_frame.fields.passive_error, BIN);
 }
 
 int check_stuffing(int ctx_bit) {
@@ -639,6 +679,7 @@ void reset_frame() {
   memset(frame.raw, 0, 19);
   crc = 0;
   rtr_srr = 0;
+  error = no_error;
 }
 
 void update_crc(int ctx_bit) {
