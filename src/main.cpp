@@ -22,11 +22,12 @@
 
 // CRC settings
 #define CRC_DIVISOR 0x4599
+#define CRC_MASK (crc & 0x7FFF)
 unsigned int crc = 0;
 
 // Pins
 const int RX_PIN = 3;  // From transceiver
-const int TX_PIN = 2;  // To transceiver
+const int TX_PIN = 5;  // To transceiver
 
 // Enums
 enum FLAGS_VALUE {
@@ -107,19 +108,20 @@ int rtr_srr = 0;
 // Tests - pins and flags
 #define DATA_FRAME 0
 #define REMOTE_FRAME 1
-bool debug = true;
+bool debug = false;
 int debug_count = 0;
 std_frame_union test_frame;
 bool print_decoder_states = true;
 bool print_once = true;
-char *test_packet = packet19;
+char *test_packet = packet18;
+char *output_frame = packet19_nostuffing;
 char ack_error[] = "ACK ERROR";
 char crc_error[] = "CRC ERROR";
 char form_error[] = "FORM ERROR";
 char stuff_error[] = "STUFFING ERROR";
 char no_error[] = "NO ERROR";
 char *error = no_error;
-const int WRITE_CTRL_PIN = 5;
+const int WRITE_CTRL_PIN = 2;
 FLAGS_VALUE manual_write = DISABLED;
 
 
@@ -133,7 +135,7 @@ void print_decoder(frame_union _frame);
 int check_stuffing(int sample_bit);             // Check the bit stuffing
 void reset_frame();                             // Reset to 0 all fields of the frame
 void update_crc(int ctx_bit);                   // Update the calculation of the CRC
-int get_from_write_frame(bool with_stuffing);   // Next bit to send with/out stuffing
+void get_from_write_frame();   // Next bit to send with/out stuffing
 void write_manual_control();                    // Tests
 
 
@@ -146,7 +148,7 @@ void init_timer() {
 
   //TCNT1 = TIMERBASE;                // Offset, number of pulses to count
   //TCNT1 = 0xC2F7;                   // Tests - Offset to interrupt every second
-  TCNT1 = 0xFFC7;                   // Tests - Offset to interrupt
+  TCNT1 = 0xFDC7;                   // Tests - Offset to interrupt
   TIMSK1 |= (1 << TOIE1);           // Enables timer interrupt
 }
 
@@ -154,7 +156,7 @@ ISR(TIMER1_OVF_vect)  // TIMER1 interrupt
 {
   //TCNT1 = TIMERBASE;  // Resets timer
   //TCNT1 = 0xC2F7;     // Tests - Resets timer every second
-  TCNT1 = 0xFFC7;     // Tests - Resets timer
+  TCNT1 = 0xFDC7;     // Tests - Resets timer
 
   bit_timing();
 }
@@ -162,20 +164,17 @@ ISR(TIMER1_OVF_vect)  // TIMER1 interrupt
 // Main arduino
 void setup() {
   Serial.begin(9600);
+  Serial.println("bom dia\n");
   pinMode(RX_PIN, INPUT);
   pinMode(TX_PIN, OUTPUT);
+  write();
   attachInterrupt(digitalPinToInterrupt(RX_PIN), edge_detection, FALLING);
-  init_timer();
 
   // Tests
-  pinMode(WRITE_CTRL_PIN, INPUT);
+  pinMode(WRITE_CTRL_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(WRITE_CTRL_PIN), write_manual_control, FALLING);
-  test_frame = create_test_stdframe(DATA_FRAME, 0x0D, 100, 0);
-  memset(test_frame.raw, 0, 14);
-  for(int i = 0; i < 14; i++) {
-    test_frame.raw[i] = 0x96; //todos os bytes 1001 0110 para evitar o stuffing
-  }
-  test_frame.raw[0] = 0xFF;
+  init_timer();
+  
 }
 
 void loop() {
@@ -278,7 +277,7 @@ void sample() {
     sample_bit = digitalRead(RX_PIN);
   }
   if( print_once) {
-    //Serial.print("Just sampled bit: ");
+    Serial.print("Just sampled bit: ");
     Serial.print(sample_bit);
   }
   jackson_enable = ENABLED;
@@ -286,8 +285,8 @@ void sample() {
 
 void write() {
   digitalWrite(TX_PIN, write_bit);
-  //Serial.print("Just wrote bit: ");
-  //Serial.println(write_bit);
+  Serial.print("Just wrote bit: ");
+  Serial.println(write_bit);
 }
 
 void jackson(int ctx_bit) {
@@ -326,6 +325,7 @@ void jackson(int ctx_bit) {
       arbitration = DISABLED;
       state = ACTIVE_ERROR;
       error = stuff_error;
+      Serial.println("Stuff ERROR");
       read_mode = DISABLED;
       conditional_write = ENABLED;
     }
@@ -481,6 +481,7 @@ void jackson(int ctx_bit) {
         else {
           state = ACTIVE_ERROR;  // Form error
           error = form_error;
+          Serial.println("Form ERROR");
           conditional_write = ENABLED;
         }
         break;
@@ -494,6 +495,7 @@ void jackson(int ctx_bit) {
         if (ctx_bit == HIGH) {
           state = ACTIVE_ERROR;
           error = ack_error;
+          Serial.println("ACK ERROR");
         }
         break;
 
@@ -502,9 +504,13 @@ void jackson(int ctx_bit) {
 
         frame.fields.ack_del = ctx_bit;
         state = _EOF;
-        if (crc != frame.fields.crc) {
+        if (CRC_MASK != frame.fields.crc) {
           state = ACTIVE_ERROR;
           error = crc_error;
+          Serial.print("CRC ERROR: ");
+          Serial.print(CRC_MASK, HEX);
+          Serial.print("-");
+          Serial.println(frame.fields.crc, HEX);
         }
         break;
 
@@ -536,12 +542,14 @@ void jackson(int ctx_bit) {
           crc_enable = ENABLED;     // Enable cyclic redundancy check
           state = ID_STANDARD;
         } else if (count >= 3) {
+          print_decoder(frame);
           count = 0;
           if(ctx_bit == LOW) {
             state = ID_STANDARD;
           } else {
             state = IDLE;
             idle = ENABLED;
+            write_mode = DISABLED;
           }
         }
         break;
@@ -565,14 +573,18 @@ void jackson(int ctx_bit) {
         frame.fields.passive_error <<= 1;
         frame.fields.passive_error |= (ctx_bit == HIGH ? 0x1 : 0x0);
         count++;
-        write_bit = HIGH;
+        conditional_write = ENABLED;
         if (ctx_bit == HIGH || count >= 6) {
           count = 0;
           state = _EOF;
+          // print_decoder(frame);
         }
         break;
       
+    
+    
     }
+    //print_decoder(frame);
   }
 
   // May write
@@ -581,6 +593,7 @@ void jackson(int ctx_bit) {
     write_mode = ENABLED;
   }
 
+  Serial.print("\n\n");
   if (write_mode == ENABLED || conditional_write == ENABLED) {
     switch(state) {
       case IDLE:
@@ -596,10 +609,8 @@ void jackson(int ctx_bit) {
       case R0:
       case DLC:
       case DATA:
-        write_bit = get_from_write_frame(true);
-        break;
       case CRC:
-        write_bit = get_from_write_frame(false);
+        get_from_write_frame();
         break;
       case CRC_DEL:
       case ACK_DEL:
@@ -609,9 +620,14 @@ void jackson(int ctx_bit) {
         write_bit = HIGH;
         break;
       case ACK_SLOT:
-        write_bit = (crc == frame.fields.crc ? LOW : HIGH);
+        Serial.print(CRC_MASK, BIN);
+        Serial.print("\t");
+        Serial.println(frame.fields.crc, BIN);
+        write_bit = (CRC_MASK == frame.fields.crc) ? LOW : HIGH;
         break;
     }
+
+    Serial.println("write_bit: " + String(write_bit));
   }
 
   read_mode = ENABLED;
@@ -644,7 +660,7 @@ void print_decoder(frame_union _frame) {
   Serial.print("CRC: ");
   Serial.print(_frame.fields.crc, HEX);
   Serial.print("\tCRC_REG: ");
-  Serial.println(crc & 0x7FFF, HEX);
+  Serial.println(CRC_MASK, HEX);
   Serial.print("CRC_DEL: ");
   Serial.println(_frame.fields.crc_del, BIN);
   Serial.print("ACK_SLOT: ");
@@ -702,10 +718,37 @@ void update_crc(int ctx_bit) {
   }
 }
 
-int get_from_write_frame(bool with_stuffing) {
-  return 1;
+void get_from_write_frame() {
+  static int count = 0;
+  // static int last_bit = HIGH;
+  static int current_index = 0;
+  static int next_bit_candidate = HIGH;
+  static char bit_index[200];
+
+  next_bit_candidate = output_frame[current_index] == '1' ? HIGH : LOW;
+  if (count >= 5) {  // Stuffing
+    write_bit = (write_bit == HIGH) ? LOW : HIGH;
+    count = 1;
+  } else {  // No stuffing
+    if (write_bit == next_bit_candidate) {
+      count++;
+    } else {
+      count = 1;
+    }
+    write_bit = next_bit_candidate;
+    Serial.println(output_frame);
+    for(int i = 0; i < current_index; i++){
+      bit_index[i] = ' ';
+    }
+    bit_index[current_index] = '|';
+    Serial.println(bit_index);
+    current_index++;
+  }
+
+  // last_bit = write_bit;
 }
 
 void write_manual_control() {
   manual_write = ENABLED;
+  Serial.println("manual_write ENABLED");
 }
