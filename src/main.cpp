@@ -58,8 +58,8 @@ enum DECODER_STATES{
   ACK_DEL,
   _EOF,
   INTERMISSION,
-  ACTIVE_ERROR,
-  PASSIVE_ERROR
+  ERROR_FLAGS,
+  ERROR_DELIMITER
 };
 
 // Writing and sampling
@@ -108,12 +108,12 @@ int rtr_srr = 0;
 // Tests - pins and flags
 #define DATA_FRAME 0
 #define REMOTE_FRAME 1
-bool debug = false;
+bool debug = true;
 int debug_count = 0;
 std_frame_union test_frame;
 bool print_decoder_states = true;
 bool print_once = true;
-char *test_packet = packet18;
+char *test_packet = packet19;
 char *output_frame = packet19_nostuffing;
 char ack_error[] = "ACK ERROR";
 char crc_error[] = "CRC ERROR";
@@ -148,7 +148,7 @@ void init_timer() {
 
   //TCNT1 = TIMERBASE;                // Offset, number of pulses to count
   //TCNT1 = 0xC2F7;                   // Tests - Offset to interrupt every second
-  TCNT1 = 0xFDC7;                   // Tests - Offset to interrupt
+  TCNT1 = 0xFFC7;                   // Tests - Offset to interrupt
   TIMSK1 |= (1 << TOIE1);           // Enables timer interrupt
 }
 
@@ -156,7 +156,7 @@ ISR(TIMER1_OVF_vect)  // TIMER1 interrupt
 {
   //TCNT1 = TIMERBASE;  // Resets timer
   //TCNT1 = 0xC2F7;     // Tests - Resets timer every second
-  TCNT1 = 0xFDC7;     // Tests - Resets timer
+  TCNT1 = 0xFFC7;     // Tests - Resets timer
 
   bit_timing();
 }
@@ -164,7 +164,7 @@ ISR(TIMER1_OVF_vect)  // TIMER1 interrupt
 // Main arduino
 void setup() {
   Serial.begin(9600);
-  Serial.println("bom dia\n");
+  //Serial.println("bom dia\n");
   pinMode(RX_PIN, INPUT);
   pinMode(TX_PIN, OUTPUT);
   write();
@@ -285,8 +285,10 @@ void sample() {
 
 void write() {
   digitalWrite(TX_PIN, write_bit);
-  Serial.print("Just wrote bit: ");
-  Serial.println(write_bit);
+  if (print_once) {
+    Serial.print("Just wrote bit: ");
+    Serial.println(write_bit);
+  }
 }
 
 void jackson(int ctx_bit) {
@@ -306,7 +308,7 @@ void jackson(int ctx_bit) {
       count = 0;
       stuffing = DISABLED;
       crc_enable = DISABLED;
-      state = ACTIVE_ERROR;  // Bit error
+      state = ERROR_FLAGS;  // Bit error
       read_mode = DISABLED;
       conditional_write = ENABLED;
     }
@@ -323,7 +325,7 @@ void jackson(int ctx_bit) {
       stuffing = DISABLED;
       crc_enable = DISABLED;
       arbitration = DISABLED;
-      state = ACTIVE_ERROR;
+      state = ERROR_FLAGS;
       error = stuff_error;
       Serial.println("Stuff ERROR");
       read_mode = DISABLED;
@@ -479,7 +481,7 @@ void jackson(int ctx_bit) {
 
         if (frame.fields.crc_del == HIGH) state = ACK_SLOT;
         else {
-          state = ACTIVE_ERROR;  // Form error
+          state = ERROR_FLAGS;  // Form error
           error = form_error;
           Serial.println("Form ERROR");
           conditional_write = ENABLED;
@@ -493,7 +495,7 @@ void jackson(int ctx_bit) {
         frame.fields.ack_slot = ctx_bit;
         state = ACK_DEL;
         if (ctx_bit == HIGH) {
-          state = ACTIVE_ERROR;
+          state = ERROR_FLAGS;
           error = ack_error;
           Serial.println("ACK ERROR");
         }
@@ -505,7 +507,7 @@ void jackson(int ctx_bit) {
         frame.fields.ack_del = ctx_bit;
         state = _EOF;
         if (CRC_MASK != frame.fields.crc) {
-          state = ACTIVE_ERROR;
+          state = ERROR_FLAGS;
           error = crc_error;
           Serial.print("CRC ERROR: ");
           Serial.print(CRC_MASK, HEX);
@@ -542,7 +544,7 @@ void jackson(int ctx_bit) {
           crc_enable = ENABLED;     // Enable cyclic redundancy check
           state = ID_STANDARD;
         } else if (count >= 3) {
-          print_decoder(frame);
+          //print_decoder(frame);
           count = 0;
           if(ctx_bit == LOW) {
             state = ID_STANDARD;
@@ -554,8 +556,8 @@ void jackson(int ctx_bit) {
         }
         break;
 
-      case ACTIVE_ERROR:
-        if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: Active Error ");
+      case ERROR_FLAGS:
+        if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: Error Flags ");
         
         frame.fields.active_error <<= 1;
         frame.fields.active_error |= (ctx_bit == HIGH ? 0x1 : 0x0);
@@ -563,20 +565,20 @@ void jackson(int ctx_bit) {
         conditional_write = ENABLED;
         if (count >= 6) {
           count = 0;
-          state = PASSIVE_ERROR;
+          state = ERROR_DELIMITER;
         }
         break;
 
-      case PASSIVE_ERROR:
-        if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: Passive Error");
+      case ERROR_DELIMITER:
+        if(print_decoder_states & print_once) Serial.println("\t\t\t\tCurrent state: Error Delimiter");
         
         frame.fields.passive_error <<= 1;
         frame.fields.passive_error |= (ctx_bit == HIGH ? 0x1 : 0x0);
         count++;
         conditional_write = ENABLED;
-        if (ctx_bit == HIGH || count >= 6) {
+        if (ctx_bit == HIGH && count >= 8) {
           count = 0;
-          state = _EOF;
+          state = IDLE;
           // print_decoder(frame);
         }
         break;
@@ -597,7 +599,7 @@ void jackson(int ctx_bit) {
   if (write_mode == ENABLED || conditional_write == ENABLED) {
     switch(state) {
       case IDLE:
-      case ACTIVE_ERROR:
+      case ERROR_FLAGS:
         write_bit = LOW;
         break;
       case ID_STANDARD:
@@ -616,7 +618,7 @@ void jackson(int ctx_bit) {
       case ACK_DEL:
       case _EOF:
       case INTERMISSION:
-      case PASSIVE_ERROR:
+      case ERROR_DELIMITER:
         write_bit = HIGH;
         break;
       case ACK_SLOT:
@@ -673,9 +675,9 @@ void print_decoder(frame_union _frame) {
   Serial.println(_frame.fields.intermission, BIN);
   Serial.println(); // </br>
   Serial.println(error);
-  Serial.print("ACTIVE_ERROR: ");
+  Serial.print("ERROR_FLAGS: ");
   Serial.println(_frame.fields.active_error, BIN);
-  Serial.print("PASSIVE_ERROR: ");
+  Serial.print("ERROR_DELIMITER: ");
   Serial.println(_frame.fields.passive_error, BIN);
 }
 
